@@ -1,5 +1,7 @@
 # CodeGraph Manager
 
+<p align="center"><b>🇨🇳 中文</b> · <a href="README.en.md">🇬🇧 English</a></p>
+
 服务器端代码索引管理服务——统一管理来自多个 Git 托管平台（GitLab / Gitee / GitHub）的仓库，自动克隆、用 [CodeGraph](https://github.com/colbymchenry/codegraph) 生成代码知识图谱，并通过 **MCP（Model Context Protocol）** 让 AI 代理直接检索代码。
 
 **零依赖 Node 后端 + 原生 JS 前端**，单命令启动，无需数据库、无需构建。
