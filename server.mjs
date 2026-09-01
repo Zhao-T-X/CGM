@@ -13,7 +13,7 @@
 //   <DATA_DIR>/settings.json   提供商配置列表 + clone 基目录
 //   <DATA_DIR>/repos.json      仓库注册表（clone 路径、分析状态）
 import http from 'node:http';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import fsSync from 'node:fs';
 import path from 'node:path';
@@ -95,8 +95,8 @@ function run(cmd, args, opts = {}) {
   });
 }
 
-/** 解析 CODEGRAPH_BIN：支持 "codegraph"(空格分隔) 或 JSON 数组(可含空格路径)。 */
-function parseBin(s) {
+/** 解析 CODEGRAPH_BIN：支持 "codegraph"(空格分隔) 或 JSON 数组(可含空格路径)。mcp.mjs 复用。 */
+export function parseBin(s) {
   s = (s || '').trim();
   if (s.startsWith('[')) { try { const a = JSON.parse(s); return a.map(String); } catch {} }
   return s.split(/\s+/).filter(Boolean);

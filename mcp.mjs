@@ -9,10 +9,9 @@
 //
 // 传输：SSE (Server-Sent Events) + HTTP POST
 
-import { promises as fs } from 'node:fs';
-import path from 'node:path';
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
+import { parseBin } from './server.mjs';
 
 // MCP 工具定义
 const MCP_TOOLS = [
@@ -218,18 +217,13 @@ export async function handleMcpMessage(req, res, repos) {
 
 // ── codegraph MCP 网关客户端（stdio）──────────────────────────────
 // 单例子进程：懒加载 + 崩溃自动重建。search_code 通过它调用 codegraph 原生 MCP。
-
-function parseBin() {
-  const raw = process.env.CODEGRAPH_BIN || 'codegraph';
-  try { const arr = JSON.parse(raw); if (Array.isArray(arr) && arr.length) return arr; } catch {}
-  return [raw];
-}
+// (parseBin 从 server.mjs 共享)
 
 let cgProc = null; // { child, rl, pending, id, ready }
 
 function getCgProc() {
   if (cgProc && cgProc.child.exitCode === null && !cgProc.closed) return cgProc;
-  const [cmd, ...args] = parseBin();
+  const [cmd, ...args] = parseBin(process.env.CODEGRAPH_BIN || 'codegraph');
   const child = spawn(cmd, [...args, 'serve', '--mcp', '--no-watch'], {
     env: { ...process.env, CODEGRAPH_MCP_TOOLS: 'explore,node,search,callers,callees,impact,files,status' },
     stdio: ['pipe', 'pipe', 'pipe'],
