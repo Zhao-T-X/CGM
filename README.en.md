@@ -87,6 +87,7 @@ Go to **http://127.0.0.1:8801**
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for external access — needs `ADMIN_TOKEN` + reverse proxy) |
 | `DATA_DIR` | `<cwd>/data` | Data directory (`settings.json` holds provider registrations incl. tokens; `repos.json` the repo registry) |
 | `CODEGRAPH_BIN` | `codegraph` | CodeGraph executable. **On Windows the global install is a bash shim — use the JSON-array form**: `["node","D:/.../npm-shim.js"]` |
+| `SYNC_HOURS` | `6` | Auto-refresh indexed repos (`git pull + codegraph sync`) interval in hours; `0` disables |
 | `ADMIN_TOKEN` | — | API access token when exposed externally |
 
 ## 🗂 Directory Structure

@@ -29,6 +29,7 @@ const DATA_DIR = process.env.DATA_DIR
   : path.join(HERE, 'data');
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const CODEGRAPH_BIN = (process.env.CODEGRAPH_BIN || 'codegraph').trim();
+const SYNC_HOURS = parseFloat(process.env.SYNC_HOURS || '6'); // 定时索引新鲜度刷新间隔（小时），0=关闭
 
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const REPOS_FILE = path.join(DATA_DIR, 'repos.json');
@@ -271,6 +272,23 @@ async function opRemove(repo) {
   if (i >= 0) repos.splice(i, 1);
   await saveRepos();
 }
+
+/* ---------------- 索引新鲜度自动刷新（SYNC_HOURS） ---------------- */
+async function autoSync() {
+  const targets = repos.filter((r) => r.status === 'indexed' && r.localPath);
+  if (!targets.length) return;
+  log(`auto-sync: ${targets.length} 个已索引仓库 git pull + codegraph sync`);
+  for (const repo of targets) {
+    try {
+      const pull = await run('git', ['-C', repo.localPath, 'pull']);
+      if (!pull.ok) log(`sync pull fail ${repo.name}: ${(pull.err || '').slice(-150)}`);
+      const [cmd, ...args] = parseBin(CODEGRAPH_BIN);
+      const sc = await run(cmd, [...args, 'sync', repo.localPath], { cwd: settings.cloneBaseDir || '.' });
+      log(`sync ${repo.name} -> ${sc.ok ? 'ok' : 'fail ' + (sc.err || '').slice(-150)}`);
+    } catch (e) { log(`sync error ${repo.name}: ${e.message}`); }
+  }
+}
+if (SYNC_HOURS > 0) setInterval(autoSync, SYNC_HOURS * 3600 * 1000);
 
 /* ---------------- 路由 ---------------- */
 const server = http.createServer(async (req, res) => {

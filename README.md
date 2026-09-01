@@ -86,7 +86,8 @@ PORT=8801 DATA_DIR=/srv/cgm-data CODEGRAPH_BIN=codegraph node server.mjs
 | `PORT` | `8801` | 监听端口 |
 | `HOST` | `127.0.0.1` | 监听地址（`0.0.0.0` 对外开放，需配 `ADMIN_TOKEN` + 反代） |
 | `DATA_DIR` | `<工作目录>/data` | 数据目录（`settings.json` 含提供商注册 + token，`repos.json` 仓库注册表） |
-| `CODEGRAPH_BIN` | `codegraph` | CodeGraph 可执行命令。**Windows 全局安装是 bash shim，必须用 JSON 数组形式**：`["node","D:/.../npm-shim.js"]` |
+| `CODEGRAPH_BIN` | `codegraph` | CodeGraph 可执行。**Windows 全局安装是 bash shim，必须用 JSON 数组形式**：`["node","D:/.../npm-shim.js"]` |
+| `SYNC_HOURS` | `6` | 已索引仓库定时 `git pull + codegraph sync` 保新鲜（小时），`0` 关闭 |
 | `ADMIN_TOKEN` | — | 对外开放时 API 访问令牌 |
 
 ## 🗂 目录结构
