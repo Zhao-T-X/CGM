@@ -1,0 +1,15 @@
+# 运行时数据（含仓库注册信息，绝对不进版本控制）
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# 日志
+*.log
+
+# 依赖（若引入）
+node_modules/
+
+# 系统
+.DS_Store
+Thumbs.db

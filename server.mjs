@@ -1,0 +1,497 @@
+// CodeGraph Manager —— 服务器代码索引管理服务
+//
+// 零依赖 Node 服务 + 原生 JS 单页前端。管理多提供商仓库的 clone → codegraph 分析 → 移除。
+// 支持：GitLab / Gitee / GitHub（可同时配置多个提供商实例）
+//
+// 运行：node server.mjs   （默认 http://127.0.0.1:8801）
+// 环境变量：
+//   HOST / PORT        监听地址端口（默认 127.0.0.1 / 8801）
+//   DATA_DIR           数据目录（settings.json + repos.json 存放，默认 ./data）
+//   ADMIN_TOKEN        可选：管理界面/API 的 Bearer 令牌（为空则仅限本机访问不作鉴权）
+//   CODEGRAPH_BIN      codegraph 可执行（默认 'codegraph'，可给绝对路径或命令串）
+// 数据：
+//   <DATA_DIR>/settings.json   提供商配置列表 + clone 基目录
+//   <DATA_DIR>/repos.json      仓库注册表（clone 路径、分析状态）
+import http from 'node:http';
+import { spawn, spawnSync } from 'node:child_process';
+import { promises as fs } from 'node:fs';
+import fsSync from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { handleMcpMessage, handleSseConnection } from './mcp.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const HOST = process.env.HOST || '127.0.0.1';
+const PORT = parseInt(process.env.PORT || '8801', 10);
+const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : path.join(HERE, 'data');
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+const CODEGRAPH_BIN = (process.env.CODEGRAPH_BIN || 'codegraph').trim();
+
+const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+const REPOS_FILE = path.join(DATA_DIR, 'repos.json');
+
+/* ---------------- 日志 ---------------- */
+function log(...a) { console.log(`[${new Date().toISOString()}]`, ...a); }
+
+/* ---------------- 持久化 ---------------- */
+async function ensureDataDir() { await fs.mkdir(DATA_DIR, { recursive: true }); }
+
+// 默认设置：providers 数组 + 全局配置
+let settings = {
+  providers: [],  // [{id, type, name, url, token, createdAt}]
+  activeProviderId: '',  // 当前激活的提供商 ID
+  cloneBaseDir: ''
+};
+let repos = []; // [{id,name,providerId,providerType,gitUrl,localPath,branch,status,message,addedAt}]
+
+async function loadAll() {
+  await ensureDataDir();
+  try {
+    const saved = JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8'));
+    // 兼容旧格式：迁移旧的单一提供商配置到新格式
+    if (saved.gitlabUrl || saved.gitlabToken || saved.giteeUrl || saved.giteeToken || saved.githubToken) {
+      const providers = [];
+      if (saved.gitlabUrl || saved.gitlabToken) {
+        providers.push({ id: crypto.randomUUID(), type: 'gitlab', name: 'GitLab', url: saved.gitlabUrl || '', token: saved.gitlabToken || '', createdAt: Date.now() });
+      }
+      if (saved.giteeUrl || saved.giteeToken) {
+        providers.push({ id: crypto.randomUUID(), type: 'gitee', name: 'Gitee', url: saved.giteeUrl || 'https://gitee.com', token: saved.giteeToken || '', createdAt: Date.now() });
+      }
+      if (saved.githubToken) {
+        providers.push({ id: crypto.randomUUID(), type: 'github', name: 'GitHub', url: '', token: saved.githubToken, createdAt: Date.now() });
+      }
+      settings = {
+        providers,
+        activeProviderId: providers[0]?.id || '',
+        cloneBaseDir: saved.cloneBaseDir || ''
+      };
+    } else {
+      settings = { ...settings, ...saved };
+    }
+  } catch {}
+  try { repos = JSON.parse(await fs.readFile(REPOS_FILE, 'utf8')); } catch {}
+}
+async function saveSettings() {
+  await ensureDataDir();
+  await fs.writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+}
+async function saveRepos() {
+  await ensureDataDir();
+  await fs.writeFile(REPOS_FILE, JSON.stringify(repos, null, 2));
+}
+
+/* ---------------- 子进程运行器 ---------------- */
+function run(cmd, args, opts = {}) {
+  return new Promise((resolve) => {
+    const p = spawn(cmd, args, { cwd: opts.cwd, env: { ...process.env, ...(opts.env||{}) } });
+    let out = '', err = '';
+    p.stdout?.on('data', (d) => (out += d));
+    p.stderr?.on('data', (d) => (err += d));
+    p.on('error', (e) => resolve({ code: -1, ok: false, out, err: e.message }));
+    p.on('close', (code) => resolve({ code, ok: code === 0, out, err }));
+  });
+}
+
+/** 解析 CODEGRAPH_BIN：支持 "codegraph"(空格分隔) 或 JSON 数组(可含空格路径)。 */
+function parseBin(s) {
+  s = (s || '').trim();
+  if (s.startsWith('[')) { try { const a = JSON.parse(s); return a.map(String); } catch {} }
+  return s.split(/\s+/).filter(Boolean);
+}
+
+/* ---------------- 提供商抽象层 ---------------- */
+function getProviderById(id) {
+  return settings.providers.find(p => p.id === id) || null;
+}
+function getActiveProvider() {
+  return getProviderById(settings.activeProviderId) || settings.providers[0] || null;
+}
+function getProviderHeaders(provider) {
+  switch (provider.type) {
+    case 'gitlab': return { 'PRIVATE-TOKEN': provider.token, 'Content-Type': 'application/json' };
+    case 'gitee': return { 'Authorization': `Bearer ${provider.token}`, 'Content-Type': 'application/json' };
+    case 'github': return { 'Authorization': `token ${provider.token}`, 'Content-Type': 'application/json', 'User-Agent': 'CodeGraph-Manager' };
+    default: return { 'Content-Type': 'application/json' };
+  }
+}
+function getProviderApiBase(provider) {
+  switch (provider.type) {
+    case 'gitlab': return provider.url.replace(/\/$/, '');
+    case 'gitee': return provider.url.replace(/\/$/, '');
+    case 'github': return 'https://api.github.com';
+    default: return provider.url.replace(/\/$/, '');
+  }
+}
+async function providerFetch(pathname, search, provider) {
+  const base = getProviderApiBase(provider);
+  const headers = getProviderHeaders(provider);
+  const url = `${base}${pathname}${search || ''}`;
+  const r = await fetch(url, { headers });
+  if (!r.ok) { const t = await r.text().catch(()=>''); throw { status: r.status, msg: t.slice(0,300) }; }
+  return r.json();
+}
+async function checkProvider(provider) {
+  try {
+    let user, version = null;
+    switch (provider.type) {
+      case 'gitlab': {
+        const me = await providerFetch('/api/v4/user', '', provider);
+        user = me?.username || me?.name;
+        try { const v = await providerFetch('/api/v4/version', '', provider); version = v?.version || null; } catch {}
+        break;
+      }
+      case 'gitee': {
+        const me = await providerFetch('/api/v5/user', '', provider);
+        user = me?.login || me?.name;
+        break;
+      }
+      case 'github': {
+        const me = await providerFetch('/user', '', provider);
+        user = me?.login || me?.name;
+        break;
+      }
+    }
+    return { ok: true, user, version };
+  } catch (e) {
+    const names = { gitlab: 'GitLab', gitee: 'Gitee', github: 'GitHub' };
+    return { ok: false, status: e.status, msg: (e instanceof TypeError ? `无法连接 ${names[provider.type] || provider.type}，请检查地址与网络` : (e.msg || String(e))) };
+  }
+}
+async function searchProjects(query, providerId) {
+  const provider = providerId ? getProviderById(providerId) : getActiveProvider();
+  if (!provider) throw { msg: '未配置提供商' };
+  const q = (query || '').trim();
+  if (!q) return [];
+  switch (provider.type) {
+    case 'gitlab': {
+      const projects = await providerFetch('/api/v4/projects', `?search=${encodeURIComponent(q)}&simple=true&per_page=50`, provider);
+      return (Array.isArray(projects) ? projects : []).map(p => ({
+        id: p.id, name: p.path_with_namespace, gitUrl: p.http_url_to_repo || p.web_url + '.git',
+        defaultBranch: p.default_branch || 'main', providerId: provider.id, providerType: 'gitlab'
+      }));
+    }
+    case 'gitee': {
+      const projects = await providerFetch('/api/v5/repos/search', `?q=${encodeURIComponent(q)}&per_page=50`, provider);
+      return (Array.isArray(projects) ? projects : []).map(p => ({
+        id: p.id, name: p.full_name, gitUrl: p.html_url + '.git',
+        defaultBranch: p.default_branch || 'main', providerId: provider.id, providerType: 'gitee'
+      }));
+    }
+    case 'github': {
+      const data = await providerFetch('/search/repositories', `?q=${encodeURIComponent(q)}&per_page=50`, provider);
+      return (data?.items || []).map(p => ({
+        id: p.id, name: p.full_name, gitUrl: p.clone_url,
+        defaultBranch: p.default_branch || 'main', providerId: provider.id, providerType: 'github'
+      }));
+    }
+    default: return [];
+  }
+}
+
+/* ---------------- 工具 ---------------- */
+const sanitize = (s) => s.replace(/[\\/<>:"|?*\x00-\x1f]/g, '__');
+function getCloneAuthUrl(gitUrl, provider) {
+  if (!provider.token) return gitUrl;
+  if (/^https?:\/\//i.test(gitUrl)) {
+    switch (provider.type) {
+      case 'gitlab': return gitUrl.replace(/^https:\/\//, `https://oauth2:${encodeURIComponent(provider.token)}@`);
+      case 'gitee': return gitUrl.replace(/^https:\/\//, `https://oauth2:${encodeURIComponent(provider.token)}@`);
+      case 'github': return gitUrl.replace(/^https:\/\//, `https://x-access-token:${encodeURIComponent(provider.token)}@`);
+      default: return gitUrl;
+    }
+  }
+  return gitUrl;
+}
+
+/* ---------------- HTTP ---------------- */
+function sendJson(res, code, obj) { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); }
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const cs = []; req.on('data', (c) => cs.push(c));
+    req.on('end', () => { try { const t = Buffer.concat(cs).toString('utf8'); resolve(t ? JSON.parse(t) : {}); } catch (e) { reject(e); } });
+    req.on('error', reject);
+  });
+}
+function auth(req) {
+  if (!ADMIN_TOKEN) return true;
+  const a = req.headers['authorization'] || '';
+  return a === 'Bearer ' + ADMIN_TOKEN || a === ADMIN_TOKEN;
+}
+async function staticServe(req, res, pathname) {
+  if (pathname === '/' || pathname === '/index.html') {
+    const f = path.join(HERE, 'public', 'index.html');
+    try { const b = await fs.readFile(f); res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(b); } catch { sendJson(res, 500, { error: 'missing public/index.html' }); }
+    return;
+  }
+  sendJson(res, 404, { error: 'not_found' });
+}
+
+/* ---------------- 仓库操作 ---------------- */
+function findRepo(id) { return repos.find((r) => r.id === id); }
+async function opClone(repo) {
+  repo.status = 'cloning'; await saveRepos();
+  const dest = path.join(settings.cloneBaseDir, sanitize(repo.name));
+  await fs.mkdir(settings.cloneBaseDir, { recursive: true }).catch(()=>{});
+  const provider = getProviderById(repo.providerId) || getActiveProvider();
+  const url = provider ? getCloneAuthUrl(repo.gitUrl, provider) : repo.gitUrl;
+  const args = ['clone'];
+  if (/^https?:\/\//i.test(url)) args.push('--depth', '1');
+  if (repo.branch) args.push('--branch', repo.branch);
+  args.push(url, dest);
+  const r = await run('git', args);
+  if (!r.ok) { repo.status = 'failed'; repo.message = (r.err || r.out).slice(-400); await saveRepos(); return false; }
+  repo.localPath = dest; repo.status = 'cloned'; repo.message = r.out.slice(-200); await saveRepos();
+  return true;
+}
+async function opAnalyze(repo) {
+  if (!repo.localPath || !fsSync.existsSync(repo.localPath)) { repo.status = 'failed'; repo.message = 'not cloned'; await saveRepos(); return false; }
+  repo.status = 'indexing'; await saveRepos();
+  const [cmd, ...args] = parseBin(CODEGRAPH_BIN);
+  const r = await run(cmd, [...args, 'init', repo.localPath], { cwd: settings.cloneBaseDir });
+  if (!r.ok) { repo.status = 'failed'; repo.message = (r.err || r.out).slice(-400); await saveRepos(); return false; }
+  repo.status = 'indexed'; repo.message = (r.out || r.err).slice(-400); await saveRepos();
+  return true;
+}
+async function opStatus(repo) {
+  if (!repo.localPath || !fsSync.existsSync(repo.localPath)) { repo.status = 'failed'; repo.message = 'not cloned'; await saveRepos(); return false; }
+  const [cmd, ...args] = parseBin(CODEGRAPH_BIN);
+  const r = await run(cmd, [...args, 'status'], { cwd: repo.localPath });
+  repo.status = r.ok ? repo.status || 'indexed' : 'failed';
+  repo.message = (r.out || r.err).slice(-400);
+  return r.ok;
+}
+async function opRemove(repo) {
+  if (repo.localPath) {
+    try { await fs.rm(repo.localPath, { recursive: true, force: true }); } catch (e) { log('remove dir failed', e.message); }
+  }
+  const i = repos.findIndex((r) => r.id === repo.id);
+  if (i >= 0) repos.splice(i, 1);
+  await saveRepos();
+}
+
+/* ---------------- 路由 ---------------- */
+const server = http.createServer(async (req, res) => {
+  try {
+    const pathname = req.url.split('?')[0];
+    const query = Object.fromEntries(new URLSearchParams(req.url.split('?')[1] || ''));
+    if (!pathname.startsWith('/api/')) {
+      // MCP 端点
+      if (pathname === '/mcp') {
+        if (req.method === 'GET') {
+          return handleSseConnection(req, res);
+        }
+        return await handleMcpMessage(req, res, repos);
+      }
+      // MCP 消息端点
+      if (pathname === '/mcp/message') {
+        return await handleMcpMessage(req, res, repos);
+      }
+      return staticServe(req, res, pathname);
+    }
+    if (!auth(req)) return sendJson(res, 401, { error: 'unauthorized' });
+
+    // 设置（全局）
+    if (pathname === '/api/settings' && req.method === 'GET') return sendJson(res, 200, settings);
+    if (pathname === '/api/settings' && req.method === 'PUT') {
+      const b = await readBody(req);
+      // 只更新全局字段，providers 通过专用端点管理
+      if (b.cloneBaseDir !== undefined) settings.cloneBaseDir = b.cloneBaseDir;
+      if (b.activeProviderId !== undefined) settings.activeProviderId = b.activeProviderId;
+      await saveSettings(); return sendJson(res, 200, settings);
+    }
+
+    // 提供商 CRUD
+    if (pathname === '/api/providers' && req.method === 'GET') {
+      // 返回提供商列表（隐藏 token）
+      const list = settings.providers.map(p => ({ ...p, token: p.token ? '***' : '' }));
+      return sendJson(res, 200, list);
+    }
+    if (pathname === '/api/providers' && req.method === 'POST') {
+      const b = await readBody(req);
+      if (!b.type || !['gitlab','gitee','github'].includes(b.type)) return sendJson(res, 400, { error: 'invalid provider type' });
+      const provider = {
+        id: crypto.randomUUID(),
+        type: b.type,
+        name: b.name || {gitlab:'GitLab',gitee:'Gitee',github:'GitHub'}[b.type],
+        url: b.url || '',
+        token: b.token || '',
+        createdAt: Date.now()
+      };
+      settings.providers.push(provider);
+      if (!settings.activeProviderId) settings.activeProviderId = provider.id;
+      await saveSettings();
+      return sendJson(res, 201, { ...provider, token: provider.token ? '***' : '' });
+    }
+    if (pathname.match(/^\/api\/providers\/[^/]+$/) && req.method === 'PUT') {
+      const id = pathname.split('/')[3];
+      const provider = getProviderById(id);
+      if (!provider) return sendJson(res, 404, { error: 'provider not found' });
+      const b = await readBody(req);
+      if (b.name !== undefined) provider.name = b.name;
+      if (b.url !== undefined) provider.url = b.url;
+      if (b.token !== undefined) provider.token = b.token;
+      await saveSettings();
+      return sendJson(res, 200, { ...provider, token: provider.token ? '***' : '' });
+    }
+    if (pathname.match(/^\/api\/providers\/[^/]+$/) && req.method === 'DELETE') {
+      const id = pathname.split('/')[3];
+      const i = settings.providers.findIndex(p => p.id === id);
+      if (i < 0) return sendJson(res, 404, { error: 'provider not found' });
+      settings.providers.splice(i, 1);
+      if (settings.activeProviderId === id) settings.activeProviderId = settings.providers[0]?.id || '';
+      await saveSettings();
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // 提供商：测试连接
+    if (pathname === '/api/providers/check' && req.method === 'POST') {
+      const b = await readBody(req);
+      const provider = { type: b.type, url: b.url || '', token: b.token || '' };
+      if (!provider.type) return sendJson(res, 400, { error: 'missing provider type' });
+      if (provider.type !== 'github' && !provider.url) return sendJson(res, 200, { ok: false, msg: '请填写实例 URL' });
+      if (!provider.token) return sendJson(res, 200, { ok: false, msg: '请填写 Access Token' });
+      const result = await checkProvider(provider);
+      return sendJson(res, 200, result);
+    }
+
+    // 提供商：搜索项目（支持搜索全部）
+    if (pathname === '/api/providers/projects' && req.method === 'GET') {
+      try {
+        const providerId = query.providerId;
+        let projects = [];
+        if (providerId === 'all' || !providerId) {
+          // 搜索所有已配置的提供商
+          const searchPromises = settings.providers.map(async (provider) => {
+            try {
+              return await searchProjects(query.q, provider.id);
+            } catch (e) {
+              log(`search error for ${provider.name}:`, e);
+              return [];
+            }
+          });
+          const results = await Promise.all(searchPromises);
+          projects = results.flat();
+        } else {
+          projects = await searchProjects(query.q, providerId);
+        }
+        return sendJson(res, 200, projects);
+      } catch (e) { return sendJson(res, 200, { error: e.msg || String(e), status: e.status }); }
+    }
+
+    // 仓库注册表
+    if (pathname === '/api/repos' && req.method === 'GET') return sendJson(res, 200, repos);
+    if (pathname === '/api/repos' && req.method === 'POST') {
+      const b = await readBody(req);
+      const id = crypto.randomUUID();
+      const repo = { id, name: b.name, providerId: b.providerId || settings.activeProviderId, providerType: b.providerType || '', gitUrl: b.gitUrl, branch: b.branch || '', localPath: null, status: 'registered', message: '', addedAt: Date.now() };
+      repos.push(repo); await saveRepos();
+      return sendJson(res, 201, repo);
+    }
+
+    // 添加本地仓库
+        if (pathname === '/api/repos/local' && req.method === 'POST') {
+          const b = await readBody(req);
+          const localPath = (b.path || '').trim();
+          if (!localPath) return sendJson(res, 400, { error: 'missing path' });
+      
+          // 检查目录是否存在
+          try { await fs.access(localPath); } catch { return sendJson(res, 400, { error: 'directory not found' }); }
+      
+          // 检查是否是 git 仓库
+          const gitDir = path.join(localPath, '.git');
+          try { await fs.access(gitDir); } catch { return sendJson(res, 400, { error: 'not a git repository (no .git directory)' }); }
+      
+          // 获取仓库信息
+          let name = b.name || path.basename(localPath);
+          let gitUrl = '';
+          let branch = '';
+      
+          try {
+            // 尝试获取 remote origin URL
+            const remoteResult = await run('git', ['remote', 'get-url', 'origin'], { cwd: localPath });
+            if (remoteResult.ok) gitUrl = remoteResult.out.trim();
+          } catch {}
+      
+          try {
+            // 尝试获取当前分支
+            const branchResult = await run('git', ['branch', '--show-current'], { cwd: localPath });
+            if (branchResult.ok) branch = branchResult.out.trim();
+          } catch {}
+      
+          const id = crypto.randomUUID();
+          const repo = {
+            id, name, providerId: '', providerType: 'local',
+            gitUrl, branch, localPath, status: 'cloned', message: 'Added from local directory',
+            addedAt: Date.now()
+          };
+          repos.push(repo); await saveRepos();
+          return sendJson(res, 201, repo);
+        }
+
+        // 浏览服务器目录
+        if (pathname === '/api/browse' && req.method === 'GET') {
+          const browsePath = (query.path || '').trim() || '/';
+          try {
+            const entries = await fs.readdir(browsePath, { withFileTypes: true });
+            const dirs = [];
+            for (const entry of entries) {
+              if (entry.isDirectory() && !entry.name.startsWith('.')) {
+                const fullPath = path.join(browsePath, entry.name);
+                let isGitRepo = false;
+                try {
+                  await fs.access(path.join(fullPath, '.git'));
+                  isGitRepo = true;
+                } catch {}
+                dirs.push({ name: entry.name, path: fullPath, isGitRepo });
+              }
+            }
+            // 按名称排序，git 仓库优先
+            dirs.sort((a, b) => {
+              if (a.isGitRepo && !b.isGitRepo) return -1;
+              if (!a.isGitRepo && b.isGitRepo) return 1;
+              return a.name.localeCompare(b.name);
+            });
+            return sendJson(res, 200, { path: browsePath, entries: dirs });
+          } catch (e) {
+            return sendJson(res, 400, { error: 'cannot read directory: ' + e.message });
+          }
+        }
+
+    // 单仓操作
+    const m = pathname.match(/^\/api\/repos\/([^/]+)\/(clone|analyze|status|remove)$/);
+    if (m) {
+      const repo = findRepo(m[1]);
+      if (!repo) return sendJson(res, 404, { error: 'no_such_repo' });
+      const action = m[2];
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.write(JSON.stringify({ ok: true, msg: 'started' }));
+      res.end();
+      try {
+        let ok = false;
+        if (action === 'clone') ok = await opClone(repo);
+        else if (action === 'analyze') ok = await opAnalyze(repo);
+        else if (action === 'status') ok = await opStatus(repo);
+        else if (action === 'remove') { await opRemove(repo); return; }
+        log(`repo ${repo.name} ${action} -> ${ok ? 'ok' : 'fail'}`);
+      } catch (e) { log('op error', e); }
+      return;
+    }
+
+    sendJson(res, 404, { error: 'not_found' });
+  } catch (e) {
+    log('req error', e);
+    if (!res.headersSent) sendJson(res, 500, { error: String(e) });
+  }
+});
+
+await loadAll();
+server.listen(PORT, HOST, () => {
+  log(`CodeGraph Manager on http://${HOST}:${PORT}`);
+  log(`data dir: ${DATA_DIR}`);
+  log(`codegraph bin: ${CODEGRAPH_BIN}`);
+  log(`auth: ${ADMIN_TOKEN ? 'Bearer token' : 'localhost only'}`);
+  log(`providers: ${settings.providers.length} configured`);
+});

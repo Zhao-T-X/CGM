@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CodeGraph Manager</title>
+<style>
+  :root{
+    --bg:#000; --bg-elevated:#0a0a0a; --bg-card:#111; --bg-card-hover:#171717;
+    --border:#27272a; --border-subtle:#1a1a1a;
+    --text-primary:#fafafa; --text-secondary:#a1a1aa; --text-tertiary:#71717a; --text-quaternary:#52525b;
+    --accent:#3b82f6; --accent-hover:#60a5fa; --accent-dim:rgba(59,130,246,.15);
+    --success:#22c55e; --success-dim:rgba(34,197,94,.15);
+    --error:#ef4444; --error-dim:rgba(239,68,68,.15);
+    --warning:#f59e0b; --warning-dim:rgba(245,158,11,.15);
+    --radius-sm:6px; --radius-md:8px; --radius-lg:12px; --radius-xl:16px;
+    --transition:150ms cubic-bezier(.4,0,.2,1);
+    --transition-slow:300ms cubic-bezier(.4,0,.2,1);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{font-size:16px;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans",Helvetica,Arial,sans-serif;color:var(--text-primary);background:var(--bg);line-height:1.5;overflow-x:hidden}
+  ::selection{background:var(--accent);color:#fff}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:var(--radius-sm)}
+  a{color:var(--accent);text-decoration:none}
+
+  .app{min-height:100vh;display:flex;flex-direction:column}
+  .topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,.8);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+  .topnav-inner{max-width:1200px;margin:0 auto;padding:0 24px;height:56px;display:flex;align-items:center;gap:32px}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:15px;color:var(--text-primary)}
+  .brand-icon{width:24px;height:24px;background:var(--text-primary);border-radius:var(--radius-sm);display:grid;place-items:center}
+  .brand-icon svg{width:14px;height:14px;color:var(--bg)}
+  .nav-pills{display:flex;gap:2px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:3px}
+  .nav-pill{padding:6px 14px;border-radius:var(--radius-md);font-size:13px;font-weight:500;color:var(--text-tertiary);background:transparent;border:none;cursor:pointer;transition:all var(--transition)}
+  .nav-pill:hover{color:var(--text-secondary);background:var(--bg-card-hover)}
+  .nav-pill.active{color:var(--text-primary);background:var(--bg-elevated);box-shadow:0 1px 2px rgba(0,0,0,.3)}
+  .spacer{flex:1}
+  .status-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:var(--radius-md);font-size:12px;font-weight:500;border:1px solid var(--border);color:var(--text-secondary);background:var(--bg-card)}
+  .status-badge .dot{width:6px;height:6px;border-radius:50%;background:var(--text-quaternary)}
+  .status-badge.connected{color:var(--success);border-color:rgba(34,197,94,.3);background:var(--success-dim)}
+  .status-badge.connected .dot{background:var(--success)}
+  .icon-btn{width:32px;height:32px;border-radius:var(--radius-md);border:1px solid var(--border);background:var(--bg-card);color:var(--text-tertiary);cursor:pointer;display:grid;place-items:center;transition:all var(--transition)}
+  .icon-btn:hover{color:var(--text-primary);border-color:var(--text-quaternary)}
+  .icon-btn:active{transform:scale(.95)}
+
+  .main{flex:1;max-width:1200px;margin:0 auto;padding:32px 24px 64px;width:100%}
+  .page-header{margin-bottom:32px;display:flex;align-items:center;justify-content:space-between}
+  .page-title{font-size:28px;font-weight:600;letter-spacing:-.02em;line-height:1.2}
+  .page-subtitle{font-size:14px;color:var(--text-tertiary);margin-top:4px}
+
+  .view{display:none;animation:fadeIn var(--transition-slow)}
+  .view.active{display:block}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+
+  .stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:32px}
+  @media(max-width:768px){.stats-grid{grid-template-columns:repeat(2,1fr)}}
+  .stat-card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-xl);padding:20px 24px;transition:all var(--transition)}
+  .stat-card:hover{border-color:var(--text-quaternary)}
+  .stat-label{font-size:13px;color:var(--text-tertiary);font-weight:500;margin-bottom:8px}
+  .stat-value{font-size:32px;font-weight:600;letter-spacing:-.02em;line-height:1}
+  .stat-value.accent{color:var(--accent)} .stat-value.success{color:var(--success)} .stat-value.error{color:var(--error)}
+
+  .card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-xl);padding:24px;margin-bottom:16px;transition:all var(--transition)}
+  .card:hover{border-color:var(--text-quaternary)}
+  .card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:20px}
+  .card-title{font-size:15px;font-weight:600}
+
+  /* 提供商列表 */
+  .provider-list{display:flex;flex-direction:column;gap:12px}
+  .provider-item{display:flex;align-items:center;gap:16px;padding:16px 20px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);transition:all var(--transition)}
+  .provider-item:hover{border-color:var(--text-quaternary)}
+  .provider-item.active{border-color:var(--accent);background:var(--accent-dim)}
+  .provider-icon{width:40px;height:40px;border-radius:var(--radius-md);display:grid;place-items:center;font-size:18px;font-weight:700}
+  .provider-icon.gitlab{background:#fc6d26;color:#fff}
+  .provider-icon.gitee{background:#c71d23;color:#fff}
+  .provider-icon.github{background:#333;color:#fff}
+  .provider-info{flex:1;min-width:0}
+  .provider-name{font-size:14px;font-weight:600;color:var(--text-primary)}
+  .provider-url{font-size:12px;color:var(--text-quaternary);font-family:ui-monospace,monospace;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .provider-badge{font-size:11px;padding:2px 8px;border-radius:var(--radius-sm);font-weight:500}
+  .provider-badge.active{background:var(--success-dim);color:var(--success)}
+  .provider-badge.inactive{background:var(--bg-card);color:var(--text-tertiary)}
+  .provider-actions{display:flex;gap:8px}
+
+  /* 弹窗 */
+  .modal-overlay{position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;animation:fadeIn .2s}
+  .modal-overlay.show{display:flex}
+  .modal{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-xl);padding:28px;width:100%;max-width:480px;box-shadow:0 24px 64px rgba(0,0,0,.5)}
+  .modal-title{font-size:18px;font-weight:600;margin-bottom:24px}
+  .form-group{display:flex;flex-direction:column;gap:6px;margin-bottom:16px}
+  .form-label{font-size:13px;font-weight:500;color:var(--text-secondary)}
+  .form-input,.form-select{height:40px;padding:0 12px;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-md);color:var(--text-primary);font-size:14px;transition:all var(--transition)}
+  .form-input:focus,.form-select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
+  .form-input::placeholder{color:var(--text-quaternary)}
+  .form-select{cursor:pointer;appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2371717a' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center}
+  .form-hint{font-size:12px;color:var(--text-quaternary)}
+  .form-group.hidden{display:none}
+  .modal-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:24px}
+
+  .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:40px;padding:0 16px;border-radius:var(--radius-md);font-size:14px;font-weight:500;cursor:pointer;transition:all var(--transition);border:none}
+  .btn:active{transform:scale(.97)}
+  .btn-primary{background:var(--text-primary);color:var(--bg)} .btn-primary:hover{background:var(--text-secondary)}
+  .btn-secondary{background:transparent;color:var(--text-secondary);border:1px solid var(--border)} .btn-secondary:hover{color:var(--text-primary);border-color:var(--text-quaternary)}
+  .btn-ghost{background:transparent;color:var(--text-tertiary);border:none;padding:0 8px} .btn-ghost:hover{color:var(--text-primary)}
+  .btn-danger{background:transparent;color:var(--error);border:1px solid rgba(239,68,68,.3)} .btn-danger:hover{background:var(--error-dim)}
+  .btn-sm{height:32px;padding:0 12px;font-size:13px}
+  .btn-group{display:flex;gap:8px;flex-wrap:wrap}
+
+  .search-bar{display:flex;gap:8px;margin-bottom:16px}
+  .search-bar .form-input{flex:1}
+  .search-results{border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden}
+  .search-item{display:flex;align-items:center;gap:12px;padding:12px 16px;cursor:pointer;transition:all var(--transition);border-bottom:1px solid var(--border-subtle)}
+  .search-item:last-child{border-bottom:none}
+  .search-item:hover{background:var(--bg-card-hover)}
+  .search-item.selected{background:var(--accent-dim)}
+  .search-item .radio{width:16px;height:16px;border:2px solid var(--text-quaternary);border-radius:50%;flex-shrink:0;transition:all var(--transition)}
+  .search-item.selected .radio{border-color:var(--accent);background:var(--accent);box-shadow:inset 0 0 0 3px var(--bg-card)}
+  .search-item-name{font-size:14px;font-weight:500}
+  .search-item-url{font-size:12px;color:var(--text-quaternary);font-family:ui-monospace,monospace}
+  .search-item-provider{font-size:11px;color:var(--text-tertiary);background:var(--bg-elevated);padding:2px 6px;border-radius:var(--radius-sm);margin-left:auto}
+
+  .table-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius-lg)}
+  .table{width:100%;border-collapse:collapse}
+  .table th{font-size:12px;font-weight:500;color:var(--text-tertiary);text-align:left;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--bg-elevated)}
+  .table td{padding:14px 16px;border-bottom:1px solid var(--border-subtle);font-size:14px;vertical-align:middle}
+  .table tr:last-child td{border-bottom:none}
+  .table tr:hover td{background:var(--bg-card-hover)}
+  .repo-name{font-weight:500} .repo-url{font-size:12px;color:var(--text-quaternary);font-family:ui-monospace,monospace;margin-top:2px}
+  .repo-path{font-size:13px;color:var(--text-secondary);font-family:ui-monospace,monospace}
+  .repo-msg{font-size:13px;color:var(--text-tertiary);max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;position:relative}
+  .repo-msg:hover{color:var(--text-secondary)}
+  .repo-msg.expanded{white-space:pre-wrap;word-break:break-all;max-width:400px}
+  .msg-popover{position:fixed;z-index:100;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:12px 16px;font-size:13px;color:var(--text-secondary);max-width:480px;max-height:300px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;box-shadow:0 8px 32px rgba(0,0,0,.4);display:none}
+  .msg-popover.show{display:block}
+
+  .status{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:var(--radius-md);font-size:12px;font-weight:500;border:1px solid var(--border)}
+  .status .dot{width:6px;height:6px;border-radius:50%}
+  .status.registered{color:var(--text-tertiary)} .status.registered .dot{background:var(--text-quaternary)}
+  .status.cloning,.status.indexing,.status.removing{color:var(--accent);border-color:rgba(59,130,246,.3);background:var(--accent-dim)} .status.cloning .dot,.status.indexing .dot,.status.removing .dot{background:var(--accent);animation:pulse 2s infinite}
+  .status.cloned,.status.indexed{color:var(--success);border-color:rgba(34,197,94,.3);background:var(--success-dim)} .status.cloned .dot,.status.indexed .dot{background:var(--success)}
+  .status.failed{color:var(--error);border-color:rgba(239,68,68,.3);background:var(--error-dim)} .status.failed .dot{background:var(--error)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  .ops{display:flex;gap:6px}
+
+  .empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;padding:48px 24px;color:var(--text-quaternary);text-align:center}
+  .empty-state p{font-size:14px;max-width:300px}
+
+  .toast{position:fixed;top:16px;right:16px;z-index:200;padding:12px 16px;border-radius:var(--radius-lg);font-size:14px;font-weight:500;background:var(--bg-card);border:1px solid var(--border);color:var(--text-primary);transform:translateX(120%);transition:transform var(--transition-slow);box-shadow:0 8px 32px rgba(0,0,0,.4)}
+  .toast.show{transform:translateX(0)} .toast.success{border-color:rgba(34,197,94,.3);color:var(--success)} .toast.error{border-color:rgba(239,68,68,.3);color:var(--error)}
+
+  @media(max-width:640px){.topnav-inner{padding:0 16px;gap:16px}.nav-pills{display:none}.main{padding:24px 16px 48px}.stats-grid{grid-template-columns:1fr 1fr}.provider-item{flex-direction:column;align-items:flex-start}}
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="topnav"><div class="topnav-inner">
+    <div class="brand"><div class="brand-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div>CodeGraph</div>
+    <div class="nav-pills">
+      <button class="nav-pill active" data-view="overview">Overview</button>
+      <button class="nav-pill" data-view="repos">Repositories</button>
+      <button class="nav-pill" data-view="settings">Settings</button>
+    </div>
+    <div class="spacer"></div>
+    <div class="status-badge" id="connStatus"><span class="dot"></span><span id="connText">No provider</span></div>
+    <button class="icon-btn" onclick="loadRepos()" title="Refresh"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg></button>
+  </div></nav>
+
+  <main class="main">
+    <div class="view active" id="view-overview">
+      <div class="page-header"><div><h1 class="page-title">Overview</h1><p class="page-subtitle">Server code index management</p></div></div>
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-label">Total Repos</div><div class="stat-value" id="statTotal">0</div></div>
+        <div class="stat-card"><div class="stat-label">Indexed</div><div class="stat-value success" id="statIndexed">0</div></div>
+        <div class="stat-card"><div class="stat-label">Processing</div><div class="stat-value accent" id="statProcessing">0</div></div>
+        <div class="stat-card"><div class="stat-label">Failed</div><div class="stat-value error" id="statFailed">0</div></div>
+      </div>
+      <div class="card"><div class="card-header"><div class="card-title">Quick Start</div></div>
+        <div style="color:var(--text-secondary);font-size:14px;line-height:1.8">
+          1. Go to <strong>Settings</strong> and add a provider (GitLab, Gitee, or GitHub).<br>
+          2. Search and add repositories in <strong>Repositories</strong>.<br>
+          3. Run analysis to generate code knowledge graphs.
+        </div>
+      </div>
+    </div>
+
+    <div class="view" id="view-repos">
+      <div class="page-header"><div><h1 class="page-title">Repositories</h1><p class="page-subtitle">Manage your code repositories</p></div></div>
+      <div class="card"><div class="card-header"><div class="card-title">Add Repository</div></div>
+        <div class="search-bar">
+          <input class="form-input" id="searchBox" placeholder="Search repositories...">
+          <button class="btn btn-secondary" onclick="searchProjects()">Search</button>
+          <button class="btn btn-primary" id="btnAdd" onclick="addSelected()" disabled>Add Selected</button>
+          <button class="btn btn-secondary" onclick="openLocalModal()">+ Add Local</button>
+        </div>
+        <div id="searchArea" class="empty-state"><p>Enter a project name and click Search, or add a local repository</p></div>
+      </div>
+      <div class="card"><div class="card-header"><div><div class="card-title">Repository List</div><div style="font-size:13px;color:var(--text-tertiary);margin-top:2px" id="repoCount"></div></div></div>
+        <div class="table-wrap"><table class="table"><thead><tr><th>Repository</th><th>Path</th><th>Status</th><th>Actions</th><th>Message</th></tr></thead><tbody id="repoTbody"></tbody></table></div>
+        <div class="empty-state" id="repoEmpty"><p>No repositories yet. Add a provider in Settings first.</p></div>
+      </div>
+    </div>
+
+    <div class="view" id="view-settings">
+      <div class="page-header"><div><h1 class="page-title">Settings</h1><p class="page-subtitle">Configure repository providers</p></div><button class="btn btn-primary" onclick="openModal()">+ Add Provider</button></div>
+      <div class="card"><div class="card-header"><div class="card-title">Providers</div></div>
+        <div class="provider-list" id="providerList"></div>
+        <div class="empty-state" id="providerEmpty"><p>No providers configured. Click "Add Provider" to get started.</p></div>
+      </div>
+      <div class="card"><div class="card-header"><div class="card-title">Global Settings</div></div>
+        <div class="form-group"><label class="form-label">Clone Base Directory <span style="color:var(--error)">*</span></label>
+          <input class="form-input" id="baseDir" placeholder="/srv/code-index">
+          <div class="form-hint">Where to store cloned repositories</div>
+        </div>
+        <button class="btn btn-secondary" onclick="saveGlobalSettings()" style="margin-top:12px">Save</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- 添加/编辑提供商弹窗 -->
+<div class="modal-overlay" id="modalOverlay" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <div class="modal-title" id="modalTitle">Add Provider</div>
+    <input type="hidden" id="editProviderId">
+    <div class="form-group">
+      <label class="form-label">Provider Type <span style="color:var(--error)">*</span></label>
+      <select class="form-select" id="modalProvider" onchange="onModalProviderChange()">
+        <option value="gitlab">GitLab</option>
+        <option value="gitee">Gitee</option>
+        <option value="github">GitHub</option>
+      </select>
+    </div>
+    <div class="form-group" id="modalUrlGroup">
+      <label class="form-label">Instance URL <span style="color:var(--error)">*</span></label>
+      <input class="form-input" id="modalUrl" placeholder="https://gitlab.company.com">
+      <div class="form-hint">Self-hosted instance URL (not needed for GitHub)</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Access Token <span style="color:var(--error)">*</span></label>
+      <input class="form-input" id="modalToken" type="password" placeholder="Your access token" autocomplete="off">
+      <div class="form-hint">Personal access token with api scope</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Display Name</label>
+      <input class="form-input" id="modalName" placeholder="e.g. Company GitLab">
+      <div class="form-hint">Optional friendly name</div>
+    </div>
+    <div id="modalCheck" style="font-size:13px;color:var(--text-tertiary);margin-top:8px"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="testModalConnection()">Test Connection</button>
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveProvider()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- 添加本地仓库弹窗 -->
+<div class="modal-overlay" id="localModalOverlay" onclick="if(event.target===this)closeLocalModal()">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-title">Add Local Repository</div>
+    <div class="form-group">
+      <label class="form-label">Repository Path <span style="color:var(--error)">*</span></label>
+      <div style="display:flex;gap:8px">
+        <input class="form-input" id="localPath" placeholder="/path/to/your/repository" style="flex:1">
+        <button class="btn btn-secondary" onclick="browseDirectory()">Browse</button>
+      </div>
+      <div class="form-hint">Absolute path to an existing git repository on this server</div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Display Name</label>
+      <input class="form-input" id="localName" placeholder="e.g. my-project">
+      <div class="form-hint">Optional friendly name (defaults to directory name)</div>
+    </div>
+    <!-- 目录浏览器 -->
+    <div id="browserPanel" style="display:none;margin-top:12px;border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden">
+      <div style="padding:8px 12px;background:var(--bg-elevated);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
+        <button class="btn btn-ghost btn-sm" onclick="browseParent()" title="上级目录">↑</button>
+        <span id="browserPath" style="font-size:12px;color:var(--text-secondary);font-family:ui-monospace,monospace;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">/</span>
+        <button class="btn btn-ghost btn-sm" onclick="closeBrowser()" title="关闭">✕</button>
+      </div>
+      <div id="browserList" style="max-height:240px;overflow-y:auto"></div>
+    </div>
+    <div id="localModalCheck" style="font-size:13px;color:var(--text-tertiary);margin-top:8px"></div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeLocalModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="addLocalRepo()">Add Repository</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<div class="msg-popover" id="msgPopover"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+let S={},providers=[],repos=[],selected=null,results=[];
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function toast(msg,type=''){const t=$('toast');t.textContent=msg;t.className='toast show'+(type?' '+type:'');clearTimeout(t._t);t._t=setTimeout(()=>t.className='toast',3000);}
+async function api(p,o={}){const r=await fetch(p,{headers:{'content-type':'application/json'},...o});return r.json();}
+const STATUS={registered:['','Registered'],cloning:['cloning','Cloning'],cloned:['cloned','Cloned'],indexing:['indexing','Indexing'],indexed:['indexed','Indexed'],removing:['removing','Removing'],failed:['failed','Failed']};
+const PROVIDER_LABELS={gitlab:'GitLab',gitee:'Gitee',github:'GitHub'};
+const PROVIDER_PLACEHOLDERS={gitlab:{url:'https://gitlab.company.com',token:'glpat-xxxx'},gitee:{url:'https://gitee.com',token:'Your Gitee access token'},github:{url:'',token:'ghp_xxxx or github_pat_xxxx'}};
+
+document.querySelectorAll('.nav-pill').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('.nav-pill').forEach(x=>x.classList.toggle('active',x===b));
+  document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active',v.id==='view-'+b.dataset.view));
+}));
+
+/* 弹窗 */
+function openModal(editId){
+  const isEdit=!!editId;
+  $('modalTitle').textContent=isEdit?'Edit Provider':'Add Provider';
+  $('editProviderId').value=editId||'';
+  if(isEdit){
+    const p=providers.find(x=>x.id===editId);
+    if(!p)return;
+    $('modalProvider').value=p.type;$('modalUrl').value=p.url||'';$('modalToken').value='';$('modalName').value=p.name||'';
+  }else{
+    $('modalProvider').value='gitlab';$('modalUrl').value='';$('modalToken').value='';$('modalName').value='';
+  }
+  onModalProviderChange();
+  $('modalCheck').textContent='';
+  $('modalOverlay').classList.add('show');
+}
+function closeModal(){$('modalOverlay').classList.remove('show');}
+function onModalProviderChange(){
+  const p=$('modalProvider').value;
+  $('modalUrlGroup').classList.toggle('hidden',p==='github');
+  $('modalUrl').placeholder=PROVIDER_PLACEHOLDERS[p].url;
+  $('modalToken').placeholder=PROVIDER_PLACEHOLDERS[p].token;
+  if(!$('modalName').value)$('modalName').placeholder=PROVIDER_LABELS[p];
+}
+async function testModalConnection(){
+  const type=$('modalProvider').value,url=$('modalUrl').value.trim(),token=$('modalToken').value.trim();
+  if(type!=='github'&&!url){toast('Please enter URL','error');return;}
+  if(!token){toast('Please enter token','error');return;}
+  $('modalCheck').textContent='Testing...';
+  const r=await api('/api/providers/check',{method:'POST',body:JSON.stringify({type,url,token})});
+  if(r.ok){$('modalCheck').innerHTML=`<span style="color:var(--success)">✓ Connected as ${esc(r.user)}${r.version?' · v'+esc(r.version):''}</span>`;toast('Connection successful','success');}
+  else{$('modalCheck').innerHTML=`<span style="color:var(--error)">✗ ${esc(r.msg||'Failed')}</span>`;toast('Connection failed','error');}
+}
+async function saveProvider(){
+  const id=$('editProviderId').value,type=$('modalProvider').value,url=$('modalUrl').value.trim(),token=$('modalToken').value.trim(),name=$('modalName').value.trim()||PROVIDER_LABELS[type];
+  if(type!=='github'&&!url){toast('Please enter URL','error');return;}
+  if(!token&&!id){toast('Please enter token','error');return;}
+  const body={type,name,url};
+  if(token)body.token=token;
+  if(id){
+    await api('/api/providers/'+id,{method:'PUT',body:JSON.stringify(body)});
+    toast('Provider updated','success');
+  }else{
+    await api('/api/providers',{method:'POST',body:JSON.stringify(body)});
+    toast('Provider added','success');
+  }
+  closeModal();await loadSettings();
+}
+
+/* 全局设置 */
+async function saveGlobalSettings(){
+  const baseDir=$('baseDir').value.trim();
+  if(!baseDir){toast('Please enter clone base directory','error');return;}
+  await api('/api/settings',{method:'PUT',body:JSON.stringify({cloneBaseDir:baseDir})});
+  toast('Settings saved','success');
+}
+
+/* 提供商列表 */
+async function loadSettings(){
+  S=await api('/api/settings');
+  providers=await api('/api/providers');
+  $('baseDir').value=S.cloneBaseDir||'';
+  renderProviders();renderConn();
+}
+function renderProviders(){
+  const list=$('providerList');list.innerHTML='';
+  $('providerEmpty').style.display=providers.length?'none':'flex';
+  providers.forEach(p=>{
+    const isActive=p.id===S.activeProviderId;
+    const div=document.createElement('div');
+    div.className='provider-item'+(isActive?' active':'');
+    div.innerHTML=`<div class="provider-icon ${p.type}">${p.type[0].toUpperCase()}</div>
+      <div class="provider-info"><div class="provider-name">${esc(p.name)}</div><div class="provider-url">${esc(p.url||'api.github.com')}</div></div>
+      <span class="provider-badge ${isActive?'active':'inactive'}">${isActive?'Active':'Inactive'}</span>
+      <div class="provider-actions">
+        ${isActive?'':`<button class="btn btn-ghost btn-sm" onclick="activateProvider('${p.id}')">Activate</button>`}
+        <button class="btn btn-ghost btn-sm" onclick="openModal('${p.id}')">Edit</button>
+        <button class="btn btn-danger btn-sm" onclick="deleteProvider('${p.id}')">Delete</button>
+      </div>`;
+    list.appendChild(div);
+  });
+}
+async function activateProvider(id){
+  await api('/api/settings',{method:'PUT',body:JSON.stringify({activeProviderId:id})});
+  toast('Provider activated','success');await loadSettings();
+}
+async function deleteProvider(id){
+  const p=providers.find(x=>x.id===id);if(!confirm('Delete "'+p.name+'"?'))return;
+  await api('/api/providers/'+id,{method:'DELETE'});
+  toast('Provider deleted','success');await loadSettings();
+}
+
+/* 连接状态 */
+function renderConn(){
+  const badge=$('connStatus'),text=$('connText');
+  const active=providers.find(p=>p.id===S.activeProviderId);
+  if(!active){badge.className='status-badge';text.textContent='No provider';return;}
+  badge.className='status-badge connected';text.textContent=active.name;
+}
+
+/* 搜索 */
+async function searchProjects(){
+  const q=$('searchBox').value.trim();if(!q)return;
+  if(!providers.length){toast('Please add a provider in Settings first','error');return;}
+  const area=$('searchArea');area.className='empty-state';area.innerHTML='<p>Searching all providers...</p>';
+  const r=await api('/api/providers/projects?'+new URLSearchParams({q}));
+  if(r.error){toast('Search failed: '+r.error,'error');area.innerHTML='<p>Search failed</p>';return;}
+  results=r;selected=null;$('btnAdd').disabled=true;
+  if(!r.length){area.innerHTML='<p>No matching projects found</p>';return;}
+  area.className='search-results';area.innerHTML=r.map((p,i)=>`<div class="search-item" onclick="pick(${i})"><div class="radio"></div><div><div class="search-item-name">${esc(p.name)}</div><div class="search-item-url">${esc(p.gitUrl)}</div></div><div class="search-item-provider">${esc(PROVIDER_LABELS[p.providerType]||p.providerType)}</div></div>`).join('');
+}
+function pick(i){selected=results[i];document.querySelectorAll('.search-item').forEach((el,ix)=>el.classList.toggle('selected',ix===i));$('btnAdd').disabled=false;}
+async function addSelected(){
+  if(!selected)return;
+  const r=await api('/api/repos',{method:'POST',body:JSON.stringify({name:selected.name,gitUrl:selected.gitUrl,branch:selected.defaultBranch||'',providerId:selected.providerId,providerType:selected.providerType})});
+  if(r.id){toast('Added: '+selected.name,'success');$('searchArea').className='empty-state';$('searchArea').innerHTML='<p>Added, cloning...</p>';$('btnAdd').disabled=true;doOp(r.id,'clone');}
+}
+
+/* 仓库 */
+async function loadRepos(){repos=await api('/api/repos');renderRepos();renderStats();renderConn();}
+function renderStats(){
+  const c={total:repos.length,indexed:repos.filter(r=>r.status==='indexed').length,processing:repos.filter(r=>['cloning','indexing','removing'].includes(r.status)).length,failed:repos.filter(r=>r.status==='failed').length};
+  $('statTotal').textContent=c.total;$('statIndexed').textContent=c.indexed;$('statProcessing').textContent=c.processing;$('statFailed').textContent=c.failed;
+}
+function renderRepos(){
+  const tb=$('repoTbody');tb.innerHTML='';
+  $('repoEmpty').style.display=repos.length?'none':'flex';
+  $('repoCount').textContent=repos.length?repos.length+' repositories':'';
+  repos.forEach(r=>{
+    const [cls]=STATUS[r.status]||['',''];
+    const msg=r.message||'';
+    const shortMsg=msg.length>60?msg.slice(0,60)+'...':msg;
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td><div class="repo-name">${esc(r.name)}</div><div class="repo-url">${esc(r.gitUrl||'')}</div></td>
+      <td><div class="repo-path">${esc(r.localPath||'Not cloned')}</div></td>
+      <td><span class="status ${cls}"><span class="dot"></span>${esc(STATUS[r.status]?STATUS[r.status][1]:r.status)}</span></td>
+      <td class="ops"><button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','clone')">Clone</button><button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','analyze')">Analyze</button><button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','status')">Status</button><button class="btn btn-danger btn-sm" onclick="doRemove('${r.id}')">Remove</button></td>
+      <td><div class="repo-msg" onclick="showMsg(this,${JSON.stringify(esc(msg)).replace(/"/g,'&quot;')})" title="Click to expand">${esc(shortMsg)}</div></td>`;
+    tb.appendChild(tr);
+  });
+}
+async function doOp(id,op){const r=repos.find(x=>x.id===id);if(r){r.status=op==='analyze'?'indexing':op==='clone'?'cloning':'registered';r.message='Processing...';renderRepos();renderStats();}fetch('/api/repos/'+id+'/'+op,{method:'POST'});}
+async function doRemove(id){const r=repos.find(x=>x.id===id);if(!confirm('Remove "'+r.name+'" and delete its directory/index?'))return;r.status='removing';r.message='Removing...';renderRepos();renderStats();await fetch('/api/repos/'+id+'/remove',{method:'POST'});toast('Removed','success');loadRepos();}
+
+loadSettings();loadRepos();setInterval(loadRepos,4000);
+
+/* 消息弹出层 */
+function showMsg(el,msg){
+  const popover=$('msgPopover');
+  if(popover.classList.contains('show')&&popover._target===el){
+    popover.classList.remove('show');return;
+  }
+  popover.textContent=msg;
+  popover._target=el;
+  const rect=el.getBoundingClientRect();
+  popover.style.left=Math.min(rect.left,window.innerWidth-500)+'px';
+  popover.style.top=(rect.bottom+8)+'px';
+  popover.classList.add('show');
+}
+document.addEventListener('click',e=>{
+  const popover=$('msgPopover');
+  if(!popover.contains(e.target)&&!e.target.classList.contains('repo-msg')){
+    popover.classList.remove('show');
+  }
+});
+
+/* 本地仓库弹窗 */
+function openLocalModal(){
+  $('localPath').value='';$('localName').value='';$('localModalCheck').textContent='';
+  $('browserPanel').style.display='none';
+  $('localModalOverlay').classList.add('show');
+}
+function closeLocalModal(){$('localModalOverlay').classList.remove('show');}
+async function addLocalRepo(){
+  const localPath=$('localPath').value.trim();
+  const localName=$('localName').value.trim();
+  if(!localPath){toast('Please enter repository path','error');return;}
+  $('localModalCheck').textContent='Adding...';
+  const r=await api('/api/repos/local',{method:'POST',body:JSON.stringify({path:localPath,name:localName||undefined})});
+  if(r.error){$('localModalCheck').innerHTML=`<span style="color:var(--error)">✗ ${esc(r.error)}</span>`;toast('Failed: '+r.error,'error');return;}
+  $('localModalCheck').innerHTML=`<span style="color:var(--success)">✓ Added successfully</span>`;
+  toast('Local repository added: '+r.name,'success');
+  closeLocalModal();loadRepos();
+}
+
+/* 目录浏览器 */
+let currentBrowsePath='/';
+async function browseDirectory(){
+  const panel=$('browserPanel');
+  if(panel.style.display==='none'){
+    panel.style.display='block';
+    const currentPath=$('localPath').value.trim();
+    await loadDirectory(currentPath || '/');
+  }else{
+    panel.style.display='none';
+  }
+}
+function closeBrowser(){$('browserPanel').style.display='none';}
+async function loadDirectory(dirPath){
+  currentBrowsePath=dirPath;
+  $('browserPath').textContent=dirPath;
+  $('browserList').innerHTML='<div style="padding:16px;text-align:center;color:var(--text-quaternary)">Loading...</div>';
+  try{
+    const r=await api('/api/browse?'+new URLSearchParams({path:dirPath}));
+    if(r.error){$('browserList').innerHTML=`<div style="padding:16px;text-align:center;color:var(--error)">${esc(r.error)}</div>`;return;}
+    if(!r.entries.length){$('browserList').innerHTML='<div style="padding:16px;text-align:center;color:var(--text-quaternary)">No subdirectories</div>';return;}
+    $('browserList').innerHTML=r.entries.map(e=>`
+      <div style="padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border-subtle);transition:background var(--transition)"
+           onmouseover="this.style.background='var(--bg-card-hover)'" onmouseout="this.style.background=''"
+           onclick="selectDirectory('${esc(e.path)}',${e.isGitRepo})">
+        <span style="font-size:14px">${e.isGitRepo ? '📁' : '📂'}</span>
+        <span style="flex:1;font-size:13px;color:var(--text-primary)">${esc(e.name)}</span>
+        ${e.isGitRepo ? '<span style="font-size:11px;color:var(--success);background:var(--success-dim);padding:2px 6px;border-radius:var(--radius-sm)">git</span>' : ''}
+      </div>
+    `).join('');
+  }catch(err){
+    $('browserList').innerHTML=`<div style="padding:16px;text-align:center;color:var(--error)">Error: ${esc(err.message||'Failed to load')}</div>`;
+  }
+}
+function selectDirectory(dirPath,isGitRepo){
+  $('localPath').value=dirPath;
+  if(isGitRepo){
+    $('localName').value=dirPath.split('/').pop()||'';
+    $('localModalCheck').innerHTML='<span style="color:var(--success)">✓ Git repository detected</span>';
+  }else{
+    $('localModalCheck').innerHTML='<span style="color:var(--warning)">⚠ Not a git repository (will fail to add)</span>';
+  }
+  closeBrowser();
+}
+function browseParent(){
+  const parts=currentBrowsePath.split('/').filter(Boolean);
+  if(parts.length>0){
+    parts.pop();
+    loadDirectory('/'+parts.join('/'));
+  }
+}
+</script>
+</body>
+</html>
