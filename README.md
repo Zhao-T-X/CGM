@@ -14,6 +14,20 @@
   - `search_code` —— 指定仓库检索代码图谱（内部经 projectPath 映射调用 CodeGraph 原生 MCP）
 - **Vercel 风深色 UI**：纯黑底 + 极简留白 + 平滑动效
 
+## 📸 界面截图
+
+**概览（指标卡 + 顶部导航）**
+![概览](public/img/index.png)
+
+**仓库管理（克隆 · 分析 · 移除）**
+![仓库管理](public/img/repo-show.png)
+
+**添加提供商（弹窗选择平台 / Gitee / GitHub）**
+![添加提供商](public/img/add-provider.png)
+
+**设置（提供商配置列表）**
+![设置](public/img/setting.png)
+
 ## 🧰 MCP 工具
 
 | 工具 | 说明 |
