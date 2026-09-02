@@ -458,12 +458,15 @@ function renderRepos(){
     tr.innerHTML=`<td><div class="repo-name">${esc(r.name)}</div><div class="repo-url">${esc(r.gitUrl||'')}</div></td>
       <td><div class="repo-path">${esc(r.localPath||'Not cloned')}</div></td>
       <td><span class="status ${cls}"><span class="dot"></span>${esc(STATUS[r.status]?STATUS[r.status][1]:r.status)}</span></td>
-      <td class="ops"><button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','clone')">Clone</button><button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','analyze')">Analyze</button><button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','status')">Status</button><button class="btn btn-danger btn-sm" onclick="doRemove('${r.id}')">Remove</button></td>
+      <td class="ops">${r.status==='indexed'
+          ? `<button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','sync')">Sync</button>`
+          : `<button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','clone')">Clone</button>`}
+        <button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','analyze')">Analyze</button><button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','status')">Status</button><button class="btn btn-danger btn-sm" onclick="doRemove('${r.id}')">Remove</button></td>
       <td><div class="repo-msg" onclick="showMsg(this,${JSON.stringify(esc(msg)).replace(/"/g,'&quot;')})" title="Click to expand">${esc(shortMsg)}</div></td>`;
     tb.appendChild(tr);
   });
 }
-async function doOp(id,op){const r=repos.find(x=>x.id===id);if(r){r.status=op==='analyze'?'indexing':op==='clone'?'cloning':'registered';r.message='Processing...';renderRepos();renderStats();}fetch('/api/repos/'+id+'/'+op,{method:'POST'});}
+async function doOp(id,op){const r=repos.find(x=>x.id===id);if(r){r.status=op==='clone'?'cloning':(op==='analyze'||op==='sync')?'indexing':'registered';r.message='Processing...';renderRepos();renderStats();}fetch('/api/repos/'+id+'/'+op,{method:'POST'});}
 async function doRemove(id){const r=repos.find(x=>x.id===id);if(!confirm('Remove "'+r.name+'" and delete its directory/index?'))return;r.status='removing';r.message='Removing...';renderRepos();renderStats();await fetch('/api/repos/'+id+'/remove',{method:'POST'});toast('Removed','success');loadRepos();}
 
 loadSettings();loadRepos();setInterval(loadRepos,4000);

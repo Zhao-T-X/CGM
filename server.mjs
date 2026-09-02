@@ -259,6 +259,17 @@ async function opAnalyze(repo) {
   repo.status = 'indexed'; repo.message = (r.out || r.err).slice(-400); await saveRepos();
   return true;
 }
+async function opSync(repo) {
+  if (!repo.localPath || !fsSync.existsSync(repo.localPath)) { repo.status = 'failed'; repo.message = 'not cloned'; await saveRepos(); return false; }
+  repo.status = 'indexing'; repo.message = 'Pulling & syncing...'; await saveRepos();
+  const pull = await run('git', ['-C', repo.localPath, 'pull']); // 拉取远端变更
+  const [cmd, ...args] = parseBin(CODEGRAPH_BIN);
+  const sc = await run(cmd, [...args, 'sync', repo.localPath], { cwd: settings.cloneBaseDir || '.' }); // 增量重建索引
+  repo.status = sc.ok ? 'indexed' : 'failed';
+  repo.message = (sc.out || sc.err || pull.err || pull.out || '').slice(-400);
+  await saveRepos();
+  return sc.ok;
+}
 async function opStatus(repo) {
   if (!repo.localPath || !fsSync.existsSync(repo.localPath)) { repo.status = 'failed'; repo.message = 'not cloned'; await saveRepos(); return false; }
   const [cmd, ...args] = parseBin(CODEGRAPH_BIN);
@@ -482,7 +493,7 @@ const server = http.createServer(async (req, res) => {
         }
 
     // 单仓操作
-    const m = pathname.match(/^\/api\/repos\/([^/]+)\/(clone|analyze|status|remove)$/);
+    const m = pathname.match(/^\/api\/repos\/([^/]+)\/(clone|analyze|status|remove|sync)$/);
     if (m) {
       const repo = findRepo(m[1]);
       if (!repo) return sendJson(res, 404, { error: 'no_such_repo' });
@@ -495,6 +506,7 @@ const server = http.createServer(async (req, res) => {
         if (action === 'clone') ok = await opClone(repo);
         else if (action === 'analyze') ok = await opAnalyze(repo);
         else if (action === 'status') ok = await opStatus(repo);
+        else if (action === 'sync') ok = await opSync(repo);
         else if (action === 'remove') { await opRemove(repo); return; }
         log(`repo ${repo.name} ${action} -> ${ok ? 'ok' : 'fail'}`);
       } catch (e) { log('op error', e); }
