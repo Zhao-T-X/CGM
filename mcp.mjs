@@ -270,9 +270,9 @@ async function cgReady() {
   return cg;
 }
 
-async function cgCallTool(name, args) {
+async function cgCallTool(name, args, timeoutMs = 30000) {
   await cgReady();
-  const res = await cgSend('tools/call', { name, arguments: args });
+  const res = await cgSend('tools/call', { name, arguments: args }, timeoutMs);
   const text = (res.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
   return { text, isError: !!res.isError };
 }
@@ -405,30 +405,45 @@ async function handleToolCall(params, repos) {
       const query = (args?.query || '').trim();
       if (!query) return { content: [{ type: 'text', text: '错误：请提供检索语句 query' }], isError: true };
 
-      // repo → projectPath 映射（省略则取第一个有本地路径的仓库）
-      let target;
+      // 单仓模式（指定 repo）：完整深度分析（原逻辑，格式不变）
       if (args?.repo) {
         const hit = findRepo(repos, args.repo);
         if (!hit) return { content: [{ type: 'text', text: `未找到匹配 "${args.repo}" 的仓库` }], isError: false };
         if (hit.multiple) return { content: [{ type: 'text', text: `匹配到多个仓库：${hit.multiple.join(', ')}，请用完整仓库名重试` }], isError: false };
-        target = hit.repo;
-      } else {
-        target = repos.find((r) => r.localPath) || null;
-        if (!target) return { content: [{ type: 'text', text: '没有可检索的仓库（无本地路径），请先克隆仓库' }], isError: false };
+        const target = hit.repo;
+        if (!target.localPath) return { content: [{ type: 'text', text: `仓库 "${target.name}" 尚未克隆（状态: ${target.status}）` }], isError: false };
+        try {
+          const { text, isError } = await cgCallTool('codegraph_explore', { query, projectPath: target.localPath, maxFiles: args?.maxFiles ?? 12 });
+          const header = `[${target.name}] ${query}\n`;
+          return { content: [{ type: 'text', text: text ? header + text : header + '（无结果）' }], isError };
+        } catch (e) {
+          return { content: [{ type: 'text', text: `检索失败: ${e.message}` }], isError: true };
+        }
       }
-      if (!target.localPath) return { content: [{ type: 'text', text: `仓库 "${target.name}" 尚未克隆（状态: ${target.status}）` }], isError: false };
 
-      try {
-        const { text, isError } = await cgCallTool('codegraph_explore', {
-          query,
-          projectPath: target.localPath,
-          maxFiles: args?.maxFiles ?? 12,
-        });
-        const header = `[${target.name}] ${query}\n`;
-        return { content: [{ type: 'text', text: text ? header + text : header + '（无结果）' }], isError };
-      } catch (e) {
-        return { content: [{ type: 'text', text: `检索失败: ${e.message}` }], isError: true };
-      }
+      // 跨仓模式（缺省 repo）：定位所有已索引仓库——收敛防爆（每仓小 maxFiles + 截断 + 总量 cap）
+      const targets = repos.filter((r) => r.status === 'indexed' && r.localPath); // 空仓/未索引跳过
+      if (!targets.length) return { content: [{ type: 'text', text: '没有可检索的已索引仓库，请先克隆并分析' }], isError: false };
+      const crossMaxFiles = args?.maxFiles ?? 8;
+      const settled = await Promise.allSettled(targets.map((t) =>
+        cgCallTool('codegraph_explore', { query, projectPath: t.localPath, maxFiles: crossMaxFiles }, 15000)
+      ));
+      const rows = settled.map((s, i) => {
+        const name = targets[i].name;
+        if (s.status === 'rejected') return { name, hit: -1, text: `[${name}] 检索失败: ${s.reason.message}` };
+        const text = s.value.text;
+        const m = text.match(/Found (\d+) symbols?/i); // codegraph 稳定格式, 仅取数字做排序
+        const hit = m ? parseInt(m[1], 10) : 0;
+        return { name, hit, text };
+      }).sort((a, b) => b.hit - a.hit); // 命中多的排前（最相关优先）
+      const hitRows = rows.filter((r) => r.hit > 0);
+      const summary = hitRows.length
+        ? `命中概况：${hitRows.map((r) => `${r.name}(${r.hit})`).join('、')}；${rows.length - hitRows.length} 个仓库无命中`
+        : `${rows.length} 个仓库均无命中`;
+      const parts = rows.map((r) => r.hit < 0 ? r.text : `[${r.name}]\n${r.text.slice(0, 400)}`); // 每仓收敛 400 字符
+      let joined = summary + '\n\n' + parts.join('\n\n');
+      if (joined.length > 4000) joined = joined.slice(0, 4000) + '\n...命中过多，请用 repo=<仓库名> 单仓深入';
+      return { content: [{ type: 'text', text: joined }], isError: false };
     }
 
     default:
