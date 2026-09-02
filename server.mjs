@@ -233,6 +233,8 @@ async function staticServe(req, res, pathname) {
 /* ---------------- 仓库操作 ---------------- */
 function findRepo(id) { return repos.find((r) => r.id === id); }
 async function opClone(repo) {
+  // 防重复：已 indexed 且目录存在 → 直接返回（不重复 clone，也不把已成功状态打回 failed）
+  if (repo.status === 'indexed' && repo.localPath && fsSync.existsSync(repo.localPath)) return true;
   repo.status = 'cloning'; await saveRepos();
   const dest = path.join(settings.cloneBaseDir, sanitize(repo.name));
   await fs.mkdir(settings.cloneBaseDir, { recursive: true }).catch(()=>{});
