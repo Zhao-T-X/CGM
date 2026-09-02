@@ -113,8 +113,10 @@
   .search-item:last-child{border-bottom:none}
   .search-item:hover{background:var(--bg-card-hover)}
   .search-item.selected{background:var(--accent-dim)}
-  .search-item .radio{width:16px;height:16px;border:2px solid var(--text-quaternary);border-radius:50%;flex-shrink:0;transition:all var(--transition)}
-  .search-item.selected .radio{border-color:var(--accent);background:var(--accent);box-shadow:inset 0 0 0 3px var(--bg-card)}
+  .search-item .radio{width:16px;height:16px;border:2px solid var(--text-quaternary);border-radius:4px;flex-shrink:0;transition:all var(--transition);position:relative}
+  .search-item .radio::after{content:'';position:absolute;left:5px;top:1px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);opacity:0;transition:opacity var(--transition)}
+  .search-item .radio.checked{border-color:var(--accent);background:var(--accent)}
+  .search-item .radio.checked::after{opacity:1}
   .search-item-name{font-size:14px;font-weight:500}
   .search-item-url{font-size:12px;color:var(--text-quaternary);font-family:ui-monospace,monospace}
   .search-item-provider{font-size:11px;color:var(--text-tertiary);background:var(--bg-elevated);padding:2px 6px;border-radius:var(--radius-sm);margin-left:auto}
@@ -293,7 +295,7 @@
 
 <script>
 const $=id=>document.getElementById(id);
-let S={},providers=[],repos=[],selected=null,results=[];
+let S={},providers=[],repos=[],selectedSet=new Set(),results=[];
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function toast(msg,type=''){const t=$('toast');t.textContent=msg;t.className='toast show'+(type?' '+type:'');clearTimeout(t._t);t._t=setTimeout(()=>t.className='toast',3000);}
 async function api(p,o={}){const r=await fetch(p,{headers:{'content-type':'application/json'},...o});return r.json();}
@@ -413,15 +415,29 @@ async function searchProjects(){
   const area=$('searchArea');area.className='empty-state';area.innerHTML='<p>Searching all providers...</p>';
   const r=await api('/api/providers/projects?'+new URLSearchParams({q}));
   if(r.error){toast('Search failed: '+r.error,'error');area.innerHTML='<p>Search failed</p>';return;}
-  results=r;selected=null;$('btnAdd').disabled=true;
-  if(!r.length){area.innerHTML='<p>No matching projects found</p>';return;}
-  area.className='search-results';area.innerHTML=r.map((p,i)=>`<div class="search-item" onclick="pick(${i})"><div class="radio"></div><div><div class="search-item-name">${esc(p.name)}</div><div class="search-item-url">${esc(p.gitUrl)}</div></div><div class="search-item-provider">${esc(PROVIDER_LABELS[p.providerType]||p.providerType)}</div></div>`).join('');
+  // 过滤掉已添加的仓库（按 name 或 gitUrl 匹配）
+  const addedNames = new Set(repos.map(x => x.name));
+  const r2 = r.filter(p => !addedNames.has(p.name) && !repos.some(x => x.gitUrl && x.gitUrl === p.gitUrl));
+  results = r2; selectedSet.clear(); updateAddBtn();
+  if (!r2.length) { area.innerHTML = '<p>All matching projects already added</p>'; return; }
+  area.className = 'search-results'; area.innerHTML = r2.map((p, i) => `<div class="search-item ${selectedSet.has(i) ? 'selected' : ''}" onclick="togglePick(${i})"><div class="radio ${selectedSet.has(i) ? 'checked' : ''}"></div><div><div class="search-item-name">${esc(p.name)}</div><div class="search-item-url">${esc(p.gitUrl)}</div></div><div class="search-item-provider">${esc(PROVIDER_LABELS[p.providerType] || p.providerType)}</div></div>`).join('');
 }
-function pick(i){selected=results[i];document.querySelectorAll('.search-item').forEach((el,ix)=>el.classList.toggle('selected',ix===i));$('btnAdd').disabled=false;}
-async function addSelected(){
-  if(!selected)return;
-  const r=await api('/api/repos',{method:'POST',body:JSON.stringify({name:selected.name,gitUrl:selected.gitUrl,branch:selected.defaultBranch||'',providerId:selected.providerId,providerType:selected.providerType})});
-  if(r.id){toast('Added: '+selected.name,'success');$('searchArea').className='empty-state';$('searchArea').innerHTML='<p>Added, cloning...</p>';$('btnAdd').disabled=true;doOp(r.id,'clone');}
+function togglePick(i) {
+  if (selectedSet.has(i)) selectedSet.delete(i); else selectedSet.add(i);
+  const el = document.querySelectorAll('.search-item')[i];
+  if (el) { el.classList.toggle('selected', selectedSet.has(i)); el.querySelector('.radio').classList.toggle('checked', selectedSet.has(i)); }
+  updateAddBtn();
+}
+function updateAddBtn() { const n = selectedSet.size; $('btnAdd').disabled = n === 0; $('btnAdd').textContent = n ? `Add Selected (${n})` : 'Add Selected'; }
+async function addSelected() {
+  const items = [...selectedSet].map(i => results[i]);
+  if (!items.length) return;
+  $('btnAdd').disabled = true;
+  for (const p of items) {
+    const r = await api('/api/repos', { method: 'POST', body: JSON.stringify({ name: p.name, gitUrl: p.gitUrl, branch: p.defaultBranch || '', providerId: p.providerId, providerType: p.providerType }) });
+    if (r.id) doOp(r.id, 'clone');
+  }
+  $('searchArea').className = 'empty-state'; $('searchArea').innerHTML = `<p>Added ${items.length} project(s), cloning & analyzing...</p>`;
 }
 
 /* 仓库 */

@@ -245,7 +245,8 @@ async function opClone(repo) {
   const r = await run('git', args);
   if (!r.ok) { repo.status = 'failed'; repo.message = (r.err || r.out).slice(-400); await saveRepos(); return false; }
   repo.localPath = dest; repo.status = 'cloned'; repo.message = r.out.slice(-200); await saveRepos();
-  return true;
+  // clone 成功 → 自动建索引
+  return await opAnalyze(repo);
 }
 async function opAnalyze(repo) {
   if (!repo.localPath || !fsSync.existsSync(repo.localPath)) { repo.status = 'failed'; repo.message = 'not cloned'; await saveRepos(); return false; }
