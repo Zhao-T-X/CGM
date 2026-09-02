@@ -39,6 +39,44 @@ function log(...a) { console.log(`[${new Date().toISOString()}]`, ...a); }
 /* ---------------- 持久化 ---------------- */
 async function ensureDataDir() { await fs.mkdir(DATA_DIR, { recursive: true }); }
 
+/* ---------------- 凭证加密（AES-256-GCM） ---------------- */
+// 约定：内存中 provider.token 保持明文（供 API/克隆调用），落盘时加密。
+// 密钥：优先 ENCRYPTION_KEY 环境变量（64 hex = 32 字节）；否则从 DATA_DIR/.key 读，无则生成。
+let encKey = null;
+function getEncKey() {
+  if (encKey) return encKey;
+  const envK = (process.env.ENCRYPTION_KEY || '').trim();
+  if (/^[0-9a-f]{64}$/i.test(envK)) { encKey = Buffer.from(envK, 'hex'); return encKey; }
+  const keyFile = path.join(DATA_DIR, '.key');
+  try {
+    const k = fsSync.readFileSync(keyFile, 'utf8').trim();
+    if (/^[0-9a-f]{64}$/i.test(k)) { encKey = Buffer.from(k, 'hex'); return encKey; }
+  } catch {}
+  const key = crypto.randomBytes(32);
+  encKey = key;
+  try { ensureDataDir(); fsSync.writeFileSync(keyFile, key.toString('hex'), { flag: 'wx' }); } catch {}
+  return encKey;
+}
+function encryptToken(t) {
+  if (!t) return t;
+  const key = getEncKey();
+  const iv = crypto.randomBytes(12);
+  const c = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const enc = Buffer.concat([c.update(String(t), 'utf8'), c.final()]);
+  const tag = c.getAuthTag();
+  return 'enc:' + iv.toString('base64') + '.' + tag.toString('base64') + '.' + enc.toString('base64');
+}
+function decryptToken(t) {
+  if (!t || !String(t).startsWith('enc:')) return t; // 非加密（第三方明文/未迁移）按原样返回
+  try {
+    const key = getEncKey();
+    const [ivb, tagb, datab] = String(t).slice(4).split('.');
+    const d = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivb, 'base64'));
+    d.setAuthTag(Buffer.from(tagb, 'base64'));
+    return Buffer.concat([d.update(Buffer.from(datab, 'base64')), d.final()]).toString('utf8');
+  } catch { return ''; } // 密钥不符/损坏 → 视为无 token
+}
+
 // 默认设置：providers 数组 + 全局配置
 let settings = {
   providers: [],  // [{id, type, name, url, token, createdAt}]
@@ -74,10 +112,23 @@ async function loadAll() {
     }
   } catch {}
   try { repos = JSON.parse(await fs.readFile(REPOS_FILE, 'utf8')); } catch {}
+  // 解密 providers token 回内存明文；检测明文 token（未迁移/第三方）→ 迁移为加密落盘
+  let needsEncrypt = false;
+  settings.providers = settings.providers.map(p => {
+    const t = p.token;
+    if (t && !String(t).startsWith('enc:')) needsEncrypt = true;
+    return { ...p, token: decryptToken(t) };
+  });
+  if (needsEncrypt) await saveSettings();
 }
 async function saveSettings() {
   await ensureDataDir();
-  await fs.writeFile(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+  // 落盘时对 providers token 加密（内存 settings 保持明文供调用）
+  const snapshot = {
+    ...settings,
+    providers: settings.providers.map(p => ({ ...p, token: p.token ? encryptToken(p.token) : '' }))
+  };
+  await fs.writeFile(SETTINGS_FILE, JSON.stringify(snapshot, null, 2));
 }
 async function saveRepos() {
   await ensureDataDir();
