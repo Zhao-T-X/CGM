@@ -112,6 +112,7 @@ async function loadAll() {
     }
   } catch {}
   try { repos = JSON.parse(await fs.readFile(REPOS_FILE, 'utf8')); } catch {}
+  await healStaleStatus(); // 启动自愈：重置被重启中断的运行中状态
   // 解密 providers token 回内存明文；检测明文 token（未迁移/第三方）→ 迁移为加密落盘
   let needsEncrypt = false;
   settings.providers = settings.providers.map(p => {
@@ -133,6 +134,20 @@ async function saveSettings() {
 async function saveRepos() {
   await ensureDataDir();
   await fs.writeFile(REPOS_FILE, JSON.stringify(repos, null, 2));
+}
+const RUNNING_STATUSES = ['cloning', 'indexing', 'removing', 'syncing'];
+// 启动自愈：进程被重启中断时，把卡在"运行中状态"的仓库重置为可重试，防永久处理中
+async function healStaleStatus() {
+  let changed = false;
+  for (const r of repos) {
+    if (RUNNING_STATUSES.includes(r.status)) {
+      // cloning→registered(重新克隆)；其余有本地目录→cloned(重新 analyze/sync)，无目录→registered
+      r.status = r.status === 'cloning' ? 'registered' : (r.localPath ? 'cloned' : 'registered');
+      r.message = 'Interrupted by restart — reset.';
+      changed = true;
+    }
+  }
+  if (changed) await saveRepos();
 }
 
 /* ---------------- 子进程运行器 ---------------- */
