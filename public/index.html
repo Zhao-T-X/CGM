@@ -213,6 +213,10 @@
           <input class="form-input" id="baseDir" placeholder="/srv/code-index">
           <div class="form-hint">Where to store cloned repositories</div>
         </div>
+        <div class="form-group"><label class="form-label">Auto Sync Frequency (hours)</label>
+          <input class="form-input" id="autoSyncHours" type="number" min="0" step="1" placeholder="6">
+          <div class="form-hint">Auto git pull + reindex indexed repos every N hours (0 = off)</div>
+        </div>
         <button class="btn btn-secondary" onclick="saveGlobalSettings()" style="margin-top:12px">Save</button>
       </div>
     </div>
@@ -361,7 +365,10 @@ async function saveProvider(){
 async function saveGlobalSettings(){
   const baseDir=$('baseDir').value.trim();
   if(!baseDir){toast('Please enter clone base directory','error');return;}
-  await api('/api/settings',{method:'PUT',body:JSON.stringify({cloneBaseDir:baseDir})});
+  const body={cloneBaseDir:baseDir};
+  const ah=$('autoSyncHours').value.trim();
+  if(ah!=='') body.autoSyncHours=parseFloat(ah);
+  await api('/api/settings',{method:'PUT',body:JSON.stringify(body)});
   toast('Settings saved','success');
 }
 
@@ -370,6 +377,7 @@ async function loadSettings(){
   S=await api('/api/settings');
   providers=await api('/api/providers');
   $('baseDir').value=S.cloneBaseDir||'';
+  $('autoSyncHours').value=(S.autoSyncHours==null?'' : S.autoSyncHours);
   renderProviders();renderConn();
 }
 function renderProviders(){

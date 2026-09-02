@@ -29,7 +29,6 @@ const DATA_DIR = process.env.DATA_DIR
   : path.join(HERE, 'data');
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const CODEGRAPH_BIN = (process.env.CODEGRAPH_BIN || 'codegraph').trim();
-const SYNC_HOURS = parseFloat(process.env.SYNC_HOURS || '6'); // 定时索引新鲜度刷新间隔（小时），0=关闭
 
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const REPOS_FILE = path.join(DATA_DIR, 'repos.json');
@@ -44,7 +43,8 @@ async function ensureDataDir() { await fs.mkdir(DATA_DIR, { recursive: true }); 
 let settings = {
   providers: [],  // [{id, type, name, url, token, createdAt}]
   activeProviderId: '',  // 当前激活的提供商 ID
-  cloneBaseDir: ''
+  cloneBaseDir: '',
+  autoSyncHours: null   // 定时同步频率（小时），null=用 env SYNC_HOURS 或默认 6；0=关闭
 };
 let repos = []; // [{id,name,providerId,providerType,gitUrl,localPath,branch,status,message,addedAt}]
 
@@ -302,7 +302,21 @@ async function autoSync() {
     } catch (e) { log(`sync error ${repo.name}: ${e.message}`); }
   }
 }
-if (SYNC_HOURS > 0) setInterval(autoSync, SYNC_HOURS * 3600 * 1000);
+// 有效同步频率：settings.autoSyncHours（配置页可调）> env SYNC_HOURS > 默认6；0=关闭
+function getSyncHours() {
+  const s = settings.autoSyncHours;
+  if (typeof s === 'number' && s >= 0) return s;
+  const e = parseFloat(process.env.SYNC_HOURS || '6');
+  return Number.isFinite(e) && e >= 0 ? e : 6;
+}
+let syncTimer = null;
+function scheduleSync() {
+  if (syncTimer) clearInterval(syncTimer);
+  syncTimer = null;
+  const h = getSyncHours();
+  if (h > 0) syncTimer = setInterval(autoSync, h * 3600 * 1000);
+}
+scheduleSync();
 
 /* ---------------- 路由 ---------------- */
 const server = http.createServer(async (req, res) => {
@@ -332,6 +346,10 @@ const server = http.createServer(async (req, res) => {
       // 只更新全局字段，providers 通过专用端点管理
       if (b.cloneBaseDir !== undefined) settings.cloneBaseDir = b.cloneBaseDir;
       if (b.activeProviderId !== undefined) settings.activeProviderId = b.activeProviderId;
+      if (b.autoSyncHours !== undefined) {
+        settings.autoSyncHours = (b.autoSyncHours === null || b.autoSyncHours === '') ? null : Number(b.autoSyncHours);
+        scheduleSync(); // 频率变更立即重建定时器
+      }
       await saveSettings(); return sendJson(res, 200, settings);
     }
 
