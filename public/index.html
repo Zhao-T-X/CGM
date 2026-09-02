@@ -458,7 +458,7 @@ function renderRepos(){
     tr.innerHTML=`<td><div class="repo-name">${esc(r.name)}</div><div class="repo-url">${esc(r.gitUrl||'')}</div></td>
       <td><div class="repo-path">${esc(r.localPath||'Not cloned')}</div></td>
       <td><span class="status ${cls}"><span class="dot"></span>${esc(STATUS[r.status]?STATUS[r.status][1]:r.status)}</span></td>
-      <td class="ops">${r.status==='indexed'
+      <td class="ops">${r.status==='indexed'||r.status==='indexing'
           ? `<button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','sync')">Sync</button>`
           : `<button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','clone')">Clone</button>`}
         <button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','analyze')">Analyze</button><button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','status')">Status</button><button class="btn btn-danger btn-sm" onclick="doRemove('${r.id}')">Remove</button></td>
