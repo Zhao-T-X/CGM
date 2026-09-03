@@ -37,12 +37,14 @@ Server-side code indexing & management service — unify repositories from multi
 | `query_repository(name)` | Resolve repo name → local path (projectPath) / status / provider |
 | `list_repositories(status?)` | List all registered repos, optional status filter |
 | `search_repositories(query)` | Fuzzy search repo names |
-| `search_code(query, repo?, maxFiles?)` | **Query code**: maps repo→projectPath, queries the CodeGraph knowledge graph, returns symbols / files / call relationships |
+| `search_code(query, repo?, branch?, maxFiles?)` | **Query code**: maps repo→projectPath, queries the CodeGraph knowledge graph, returns symbols / files / call relationships. Pass `branch` to query that branch's worktree index (first call auto-builds the index in the background and returns "retry later") |
 
-Example:
+Example (by branch):
 ```json
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"AuthService loginUser","repo":"tineco-nmp","maxFiles":12}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"AuthService loginUser","repo":"tineco-nmp","branch":"dev_ibu","maxFiles":12}}}
 ```
+
+> Multi-branch: repos are cloned fully (not shallow). The default-branch index covers only the default branch; passing `branch` makes the backend `git worktree add` that branch into its own index. The default index is kept clean via `.gitignore` exempting `worktrees/`.
 
 ## 📦 Dependencies
 

@@ -12,8 +12,16 @@
 - **代码索引**：`clone → analyze → status → remove` 全流程，基于 CodeGraph 生成符号/文件/调用关系图谱
 - **跨源搜索**：一次关键词搜索所有已配置的提供商，结果合并展示（带来源标签）
 - **本地仓库支持**：直接纳入已克隆的本地目录（自动识别 Git 远程和分支）
+- **多分支策略（worktree）**：每个仓库可按分支名懒加载切出独立 `git worktree` 并各自建索引；MCP `search_code` 传 `branch` 即检索该分支代码；主仓库 `.gitignore` 自动豁免 `worktrees/`，主索引不混入分支代码
+- **异步懒加载**：首次检索某分支时若尚未建索引，后台自动 `fetch + worktree add + codegraph init`，立即返回"分支索引创建中，请稍后重试"，建好后即可检索；脏注册/残留目录自动自愈
+- **仓库级联展示**：UI 主仓库行下展开各分支 worktree 子行（缩进 + 蓝色分支标识 + 独立状态），支持单独删除某分支 worktree
+- **Token 加密存储**：提供商 token 以 AES-256-GCM 落盘加密（密钥 `ENCRYPTION_KEY` 或自动生成的 `.key`），内存明文，调用点无感
+- **跨仓聚合检索**：`search_code` 不指定 repo 时并发检索所有已索引仓库，命中数排序 + 每仓收敛 + 总量 cap，避免上下文爆炸
+- **启动自愈**：重启后中断的 `cloning/indexing/removing/syncing` 状态自动重置为可重试
+- **定时同步**：Settings 页可配置自动同步频率（小时），0 关闭，保存即重建定时器
+- **克隆健壮性**：clone 前清理残留目录，避免 `already exists` 失败
 - **MCP 服务器**：`POST /mcp`（Streamable HTTP / JSON-RPC），暴露 4 个工具让 AI 检索代码
-  - `search_code` —— 指定仓库检索代码图谱（内部经 projectPath 映射调用 CodeGraph 原生 MCP）
+  - `search_code` —— 指定仓库（及可选分支）检索代码图谱（内部经 projectPath 映射调用 CodeGraph 原生 MCP）
 - **Vercel 风深色 UI**：纯黑底 + 极简留白 + 平滑动效
 
 ## 📸 界面截图
@@ -37,12 +45,14 @@
 | `query_repository(name)` | 按仓库名查本地路径(projectPath)/状态/提供商 |
 | `list_repositories(status?)` | 列出所有已注册仓库，可按状态过滤 |
 | `search_repositories(query)` | 模糊搜索仓库名 |
-| `search_code(query, repo?, maxFiles?)` | **检索代码**：repo→projectPath 映射后调用 CodeGraph 知识图谱，返回符号/文件/调用关系 |
+| `search_code(query, repo?, branch?, maxFiles?)` | **检索代码**：repo→projectPath 映射后调用 CodeGraph 知识图谱，返回符号/文件/调用关系。传 `branch` 则在该分支的 worktree 索引上检索（首次自动后台建索引，返回"稍后重试"） |
 
-示例调用：
+示例调用（按分支检索）：
 ```json
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"AuthService loginUser","repo":"tineco-nmp","maxFiles":12}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"AuthService loginUser","repo":"tineco-nmp","branch":"dev_ibu","maxFiles":12}}}
 ```
+
+> 多分支说明：仓库默认全量克隆（非浅克隆），主仓库索引只含默认分支；指定 `branch` 时后端自动 `git worktree add` 切出该分支并独立建索引，主索引通过 `.gitignore` 豁免 `worktrees/` 不被污染。
 
 ## 📦 依赖
 
