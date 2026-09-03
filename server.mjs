@@ -383,10 +383,25 @@ async function opEnsureWorktree(repo, branch) {
       if (!giContent.split('\n').map(s => s.trim()).includes('worktrees/')) {
         await fs.appendFile(gi, (giContent && !giContent.endsWith('\n') ? '\n' : '') + 'worktrees/\n').catch(()=>{});
       }
+      // fetch 分支引用（若远端无此分支，给出友好提示而非堆 git 原始错误）
       const fetchR = await run('git', ['fetch', 'origin', `${branch}:refs/remotes/origin/${branch}`], { cwd: repo.localPath });
-      if (!fetchR.ok) throw new Error('fetch branch failed: ' + (fetchR.err || '').slice(-200));
-      await fs.mkdir(wt.localPath, { recursive: true }).catch(()=>{});
-      const addR = await run('git', ['worktree', 'add', '-q', wt.localPath, `origin/${branch}`], { cwd: repo.localPath });
+      if (!fetchR.ok) {
+        const errMsg = (fetchR.err || '').toLowerCase();
+        if (errMsg.includes('couldn') && errMsg.includes('remote ref')) {
+          throw new Error(`远端不存在分支 "${branch}"（请确认分支名拼写与远程分支）`);
+        }
+        throw new Error('fetch branch failed: ' + (fetchR.err || '').slice(-200));
+      }
+      // worktree add：若因残留/注册表脏失败，先 prune + 清注册 + 删目录再重试
+      let addR = await run('git', ['worktree', 'add', '-q', wt.localPath, `origin/${branch}`], { cwd: repo.localPath });
+      if (!addR.ok && /already exists|already registered|missing worktree|missing but|not a valid|is already checked out/i.test(addR.err || addR.out || '')) {
+        await run('git', ['worktree', 'prune', '--expire', 'now'], { cwd: repo.localPath }).catch(()=>{});
+        await run('git', ['worktree', 'prune'], { cwd: repo.localPath });
+        await fs.rm(wt.localPath, { recursive: true, force: true }).catch(()=>{});
+        // 清掉 git 内部 worktrees 注册目录（防 "missing worktree" 残留注册）
+        await fs.rm(path.join(repo.localPath, '.git', 'worktrees', sanitize(branch)), { recursive: true, force: true }).catch(()=>{});
+        addR = await run('git', ['worktree', 'add', '-q', wt.localPath, `origin/${branch}`], { cwd: repo.localPath });
+      }
       if (!addR.ok) throw new Error('worktree add failed: ' + (addR.err || addR.out || '').slice(-200));
       const [cmd, ...cargs] = parseBin(CODEGRAPH_BIN);
       const anR = await run(cmd, [...cargs, 'init', wt.localPath], { cwd: path.dirname(repo.localPath) });
