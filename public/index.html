@@ -129,6 +129,9 @@
   .table tr:hover td{background:var(--bg-card-hover)}
   .repo-name{font-weight:500} .repo-url{font-size:12px;color:var(--text-quaternary);font-family:ui-monospace,monospace;margin-top:2px}
   .repo-path{font-size:13px;color:var(--text-secondary);font-family:ui-monospace,monospace}
+  .wt-row td{background:rgba(59,130,246,0.04);border-top:1px dashed rgba(255,255,255,0.06)}
+  .wt-row .wt-branch{color:var(--accent);font-weight:600;padding-left:18px;font-family:ui-monospace,monospace}
+  .wt-row .repo-path{font-size:12px;color:var(--text-quaternary)}
   .repo-msg{font-size:13px;color:var(--text-tertiary);max-width:280px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;position:relative}
   .repo-msg:hover{color:var(--text-secondary)}
   .repo-msg.expanded{white-space:pre-wrap;word-break:break-all;max-width:400px}
@@ -469,11 +472,24 @@ function renderRepos(){
       <td class="ops">${r.status==='indexed'||r.status==='indexing'
           ? `<button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','sync')">Sync</button>`
           : `<button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','clone')">Clone</button>`}
-        <button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','analyze')">Analyze</button><button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','status')">Status</button><button class="btn btn-danger btn-sm" onclick="doRemove('${r.id}')">Remove</button></td>
+        <button class="btn btn-ghost btn-sm" onclick="doWt('${r.id}')">Cut Branch</button><button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','analyze')">Analyze</button><button class="btn btn-ghost btn-sm" onclick="doOp('${r.id}','status')">Status</button><button class="btn btn-danger btn-sm" onclick="doRemove('${r.id}')">Remove</button></td>
       <td><div class="repo-msg" onclick="showMsg(this,${JSON.stringify(esc(msg)).replace(/"/g,'&quot;')})" title="Click to expand">${esc(shortMsg)}</div></td>`;
     tb.appendChild(tr);
+    // 级联展示：主仓库下的分支 worktree
+    (r.worktrees||[]).forEach(w=>{
+      const [wc]=STATUS[w.status]||['',''];
+      const wtr=document.createElement('tr');wtr.className='wt-row';
+      wtr.innerHTML=`<td><div class="repo-name wt-branch">⎇ ${esc(w.branch)}</div></td>
+        <td><div class="repo-path">${esc(w.localPath||'')}</div></td>
+        <td><span class="status ${wc}"><span class="dot"></span>${esc(STATUS[w.status]?STATUS[w.status][1]:w.status)}</span></td>
+        <td class="ops"></td>
+        <td></td>`;
+      tb.appendChild(wtr);
+    });
   });
 }
+// 弹窗输入分支名 → 触发后台创建 worktree（异步，返回稍后重试）
+async function doWt(id){const br=prompt('输入要切出的分支名（远程已存在的分支）：');if(!br||!br.trim())return;const r=repos.find(x=>x.id===id);if(r){r.message='Creating branch worktree...';renderRepos();}await fetch('/api/repos/'+id+'/worktree',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({branch:br.trim()})});toast('Branch "'+br.trim()+'" indexing, retry search later','success');loadRepos();}
 async function doOp(id,op){const r=repos.find(x=>x.id===id);if(r){r.status=op==='clone'?'cloning':(op==='analyze'||op==='sync')?'indexing':'registered';r.message='Processing...';renderRepos();renderStats();}fetch('/api/repos/'+id+'/'+op,{method:'POST'});}
 async function doRemove(id){const r=repos.find(x=>x.id===id);if(!confirm('Remove "'+r.name+'" and delete its directory/index?'))return;r.status='removing';r.message='Removing...';renderRepos();renderStats();await fetch('/api/repos/'+id+'/remove',{method:'POST'});toast('Removed','success');loadRepos();}
 

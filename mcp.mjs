@@ -11,7 +11,7 @@
 
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
-import { parseBin } from './server.mjs';
+import { parseBin, opEnsureWorktree } from './server.mjs';
 
 // MCP 工具定义
 const MCP_TOOLS = [
@@ -412,6 +412,21 @@ async function handleToolCall(params, repos) {
         if (hit.multiple) return { content: [{ type: 'text', text: `匹配到多个仓库：${hit.multiple.join(', ')}，请用完整仓库名重试` }], isError: false };
         const target = hit.repo;
         if (!target.localPath) return { content: [{ type: 'text', text: `仓库 "${target.name}" 尚未克隆（状态: ${target.status}）` }], isError: false };
+        // 多分支策略：指定 branch → 定位/触发该分支 worktree
+        if (args?.branch) {
+          const ensure = await opEnsureWorktree(target, args.branch);
+          if (!ensure.ready) {
+            const st = (target.worktrees || []).find((w) => w.branch === args.branch)?.status || 'registered';
+            return { content: [{ type: 'text', text: `分支 "${args.branch}" 索引${st === 'indexing' ? '正在创建' : '待创建'}中（fetch + worktree + 分析），请稍后重试。后台完成后即可检索该分支代码。` }], isError: false };
+          }
+          try {
+            const { text, isError } = await cgCallTool('codegraph_explore', { query, projectPath: ensure.localPath, maxFiles: args?.maxFiles ?? 12 });
+            const header = `[${target.name}@${args.branch}] ${query}\n`;
+            return { content: [{ type: 'text', text: text ? header + text : header + '（无结果）' }], isError };
+          } catch (e) {
+            return { content: [{ type: 'text', text: `检索失败: ${e.message}` }], isError: true };
+          }
+        }
         try {
           const { text, isError } = await cgCallTool('codegraph_explore', { query, projectPath: target.localPath, maxFiles: args?.maxFiles ?? 12 });
           const header = `[${target.name}] ${query}\n`;

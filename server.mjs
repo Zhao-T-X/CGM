@@ -84,7 +84,9 @@ let settings = {
   cloneBaseDir: '',
   autoSyncHours: null   // 定时同步频率（小时），null=用 env SYNC_HOURS 或默认 6；0=关闭
 };
-let repos = []; // [{id,name,providerId,providerType,gitUrl,localPath,branch,status,message,addedAt}]
+let repos = []; // [{id,name,providerId,providerType,gitUrl,localPath,branch,status,message,addedAt,worktrees:[{branch,localPath,status,message}]}]
+// worktree 状态：registered(待建) / indexing(建+分析中) / indexed(可用) / failed
+function ensureWorktreesField() { for (const r of repos) if (!Array.isArray(r.worktrees)) r.worktrees = []; }
 
 async function loadAll() {
   await ensureDataDir();
@@ -113,6 +115,7 @@ async function loadAll() {
   } catch {}
   try { repos = JSON.parse(await fs.readFile(REPOS_FILE, 'utf8')); } catch {}
   await healStaleStatus(); // 启动自愈：重置被重启中断的运行中状态
+  ensureWorktreesField();  // 兼容旧数据：确保 worktrees 字段存在
   // 解密 providers token 回内存明文；检测明文 token（未迁移/第三方）→ 迁移为加密落盘
   let needsEncrypt = false;
   settings.providers = settings.providers.map(p => {
@@ -152,8 +155,9 @@ async function healStaleStatus() {
 
 /* ---------------- 子进程运行器 ---------------- */
 function run(cmd, args, opts = {}) {
+  // CODEGRAPH_NO_WATCHDOG=1：禁用 codegraph 看门狗子进程，避免其孤儿进程长期锁 .codegraph/codegraph.db（导致再 clone/analyze 时 EBUSY）
   return new Promise((resolve) => {
-    const p = spawn(cmd, args, { cwd: opts.cwd, env: { ...process.env, ...(opts.env||{}) } });
+    const p = spawn(cmd, args, { cwd: opts.cwd, env: { ...process.env, CODEGRAPH_NO_WATCHDOG: '1', ...(opts.env||{}) } });
     let out = '', err = '';
     p.stdout?.on('data', (d) => (out += d));
     p.stderr?.on('data', (d) => (err += d));
@@ -304,15 +308,18 @@ async function opClone(repo) {
   repo.status = 'cloning'; await saveRepos();
   const dest = path.join(settings.cloneBaseDir, sanitize(repo.name));
   await fs.mkdir(settings.cloneBaseDir, { recursive: true }).catch(()=>{});
+  // 目标目录已存在（残留/上次失败）→ 清掉重新 clone，避免 "already exists" 失败
+  await fs.rm(dest, { recursive: true, force: true }).catch(()=>{});
   const provider = getProviderById(repo.providerId) || getActiveProvider();
   const url = provider ? getCloneAuthUrl(repo.gitUrl, provider) : repo.gitUrl;
   const args = ['clone'];
-  if (/^https?:\/\//i.test(url)) args.push('--depth', '1');
   if (repo.branch) args.push('--branch', repo.branch);
   args.push(url, dest);
   const r = await run('git', args);
   if (!r.ok) { repo.status = 'failed'; repo.message = (r.err || r.out).slice(-400); await saveRepos(); return false; }
   repo.localPath = dest; repo.status = 'cloned'; repo.message = r.out.slice(-200); await saveRepos();
+  // 主仓库 .gitignore 追加 worktrees/，豁免分支 worktree 被主索引扫入（多分支策略）
+  await fs.appendFile(path.join(dest, '.gitignore'), '\nworktrees/\n').catch(()=>{});
   // clone 成功 → 自动建索引
   return await opAnalyze(repo);
 }
@@ -352,6 +359,48 @@ async function opRemove(repo) {
   if (i >= 0) repos.splice(i, 1);
   await saveRepos();
 }
+
+// 多分支策略：确保某个分支的 worktree 已建好并索引。
+// 返回 { ready:true, localPath } 或 { ready:false, pending:true }（后台异步建，调用方应提示"稍后重试"）
+async function opEnsureWorktree(repo, branch) {
+  if (!repo.localPath || !fsSync.existsSync(repo.localPath)) return { ready: false, error: '主仓库尚未克隆' };
+  const existing = (repo.worktrees || []).find((w) => w.branch === branch);
+  if (existing) {
+    if (existing.status === 'indexed' && existing.localPath && fsSync.existsSync(existing.localPath)) return { ready: true, localPath: existing.localPath };
+    if (existing.status === 'indexing') return { ready: false, pending: true };
+    if (existing.status === 'failed') { /* 重建 */ }
+  }
+  // 触发后台异步建：fetch 分支引用 → worktree add → codegraph init
+  const wt = existing || { branch, localPath: path.join(repo.localPath, 'worktrees', sanitize(branch)), status: 'registered', message: '' };
+  if (!existing) { repo.worktrees = repo.worktrees || []; repo.worktrees.push(wt); }
+  wt.status = 'indexing'; wt.message = 'Creating worktree & indexing...'; await saveRepos();
+  (async () => {
+    try {
+      // 主仓库 .gitignore 追加 worktrees/（豁免分支 worktree 被主索引扫入；兼容已存在的老仓库）
+      const gi = path.join(repo.localPath, '.gitignore');
+      let giContent = '';
+      try { giContent = await fs.readFile(gi, 'utf8'); } catch {}
+      if (!giContent.split('\n').map(s => s.trim()).includes('worktrees/')) {
+        await fs.appendFile(gi, (giContent && !giContent.endsWith('\n') ? '\n' : '') + 'worktrees/\n').catch(()=>{});
+      }
+      const fetchR = await run('git', ['fetch', 'origin', `${branch}:refs/remotes/origin/${branch}`], { cwd: repo.localPath });
+      if (!fetchR.ok) throw new Error('fetch branch failed: ' + (fetchR.err || '').slice(-200));
+      await fs.mkdir(wt.localPath, { recursive: true }).catch(()=>{});
+      const addR = await run('git', ['worktree', 'add', '-q', wt.localPath, `origin/${branch}`], { cwd: repo.localPath });
+      if (!addR.ok) throw new Error('worktree add failed: ' + (addR.err || addR.out || '').slice(-200));
+      const [cmd, ...cargs] = parseBin(CODEGRAPH_BIN);
+      const anR = await run(cmd, [...cargs, 'init', wt.localPath], { cwd: path.dirname(repo.localPath) });
+      wt.status = anR.ok ? 'indexed' : 'failed';
+      wt.message = anR.ok ? (anR.out || '').slice(-200) : (anR.err || '').slice(-200);
+    } catch (e) {
+      wt.status = 'failed'; wt.message = e.message;
+    }
+    await saveRepos();
+    log(`worktree ${repo.name}@${branch} -> ${wt.status}`);
+  })();
+  return { ready: false, pending: true };
+}
+export { opEnsureWorktree };
 
 /* ---------------- 索引新鲜度自动刷新（SYNC_HOURS） ---------------- */
 async function autoSync() {
@@ -502,9 +551,24 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/repos' && req.method === 'POST') {
       const b = await readBody(req);
       const id = crypto.randomUUID();
-      const repo = { id, name: b.name, providerId: b.providerId || settings.activeProviderId, providerType: b.providerType || '', gitUrl: b.gitUrl, branch: b.branch || '', localPath: null, status: 'registered', message: '', addedAt: Date.now() };
+      const repo = { id, name: b.name, providerId: b.providerId || settings.activeProviderId, providerType: b.providerType || '', gitUrl: b.gitUrl, branch: b.branch || '', localPath: null, status: 'registered', message: '', addedAt: Date.now(), worktrees: [] };
       repos.push(repo); await saveRepos();
       return sendJson(res, 201, repo);
+    }
+
+    // 分支 worktree：GET 列出已有 / POST 触发创建某分支（异步，返回 pending）
+    const wm = pathname.match(/^\/api\/repos\/([^/]+)\/worktree$/);
+    if (wm) {
+      const repo = findRepo(wm[1]);
+      if (!repo) return sendJson(res, 404, { error: 'no_such_repo' });
+      if (req.method === 'GET') return sendJson(res, 200, repo.worktrees || []);
+      if (req.method === 'POST') {
+        const b = await readBody(req);
+        const branch = (b.branch || '').trim();
+        if (!branch) return sendJson(res, 400, { error: 'missing branch' });
+        const result = await opEnsureWorktree(repo, branch);
+        return sendJson(res, result.ready ? 200 : 202, { branch, status: (repo.worktrees||[]).find(w=>w.branch===branch)?.status, ...result });
+      }
     }
 
     // 添加本地仓库
