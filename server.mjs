@@ -352,8 +352,29 @@ async function opStatus(repo) {
   return r.ok;
 }
 async function opRemove(repo) {
-  if (repo.localPath) {
-    try { await fs.rm(repo.localPath, { recursive: true, force: true }); } catch (e) { log('remove dir failed', e.message); }
+  const tryRemove = async () => {
+    // 1. 先解所有 worktree 锁（SQLite db 持有者），否则 Windows 上 EBUSY
+    for (const w of (repo.worktrees || [])) {
+      if (w.localPath && fsSync.existsSync(w.localPath)) {
+        await run('git', ['worktree', 'remove', '--force', w.localPath], { cwd: repo.localPath }).catch(()=>{});
+      }
+    }
+    if (repo.localPath && fsSync.existsSync(repo.localPath)) {
+      // 主仓库自身若是 worktree 也解一下
+      await run('git', ['worktree', 'remove', '--force', repo.localPath], {}).catch(()=>{});
+      await fs.rm(repo.localPath, { recursive: true, force: true });
+    }
+  };
+  try {
+    await tryRemove();
+  } catch (e) {
+    if (/EBUSY/i.test(e.message)) {
+      // SQLite db 仍被锁（多半是另一 codegraph 实例/本进程 watchdog 占着），后台延迟重试
+      log('remove EBUSY, retry later', repo.localPath);
+      setTimeout(() => tryRemove().catch(err => log('remove retry failed', err.message)), 5000);
+    } else {
+      log('remove dir failed', e.message);
+    }
   }
   const i = repos.findIndex((r) => r.id === repo.id);
   if (i >= 0) repos.splice(i, 1);
