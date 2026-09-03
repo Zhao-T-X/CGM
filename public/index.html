@@ -482,7 +482,7 @@ function renderRepos(){
       wtr.innerHTML=`<td><div class="repo-name wt-branch">⎇ ${esc(w.branch)}</div></td>
         <td><div class="repo-path">${esc(w.localPath||'')}</div></td>
         <td><span class="status ${wc}"><span class="dot"></span>${esc(STATUS[w.status]?STATUS[w.status][1]:w.status)}</span></td>
-        <td class="ops"></td>
+        <td class="ops"><button class="btn btn-danger btn-sm" onclick="doWtRemove('${r.id}','${esc(w.branch)}')">Del</button></td>
         <td></td>`;
       tb.appendChild(wtr);
     });
@@ -490,6 +490,8 @@ function renderRepos(){
 }
 // 弹窗输入分支名 → 触发后台创建 worktree（异步，返回稍后重试）
 async function doWt(id){const br=prompt('输入要切出的分支名（远程已存在的分支）：');if(!br||!br.trim())return;const r=repos.find(x=>x.id===id);if(r){r.message='Creating branch worktree...';renderRepos();}await fetch('/api/repos/'+id+'/worktree',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({branch:br.trim()})});toast('Branch "'+br.trim()+'" indexing, retry search later','success');loadRepos();}
+// 删除单个分支 worktree
+async function doWtRemove(id,branch){if(!confirm('删除分支 "'+branch+'" 的 worktree 索引？'))return;const r=repos.find(x=>x.id===id);if(r){const w=(r.worktrees||[]).find(x=>x.branch===branch);if(w){w.status='removing';w.message='Removing...';renderRepos();}}await fetch('/api/repos/'+id+'/worktree/'+encodeURIComponent(branch),{method:'DELETE'});toast('Branch "'+branch+'" removed','success');loadRepos();}
 async function doOp(id,op){const r=repos.find(x=>x.id===id);if(r){r.status=op==='clone'?'cloning':(op==='analyze'||op==='sync')?'indexing':'registered';r.message='Processing...';renderRepos();renderStats();}fetch('/api/repos/'+id+'/'+op,{method:'POST'});}
 async function doRemove(id){const r=repos.find(x=>x.id===id);if(!confirm('Remove "'+r.name+'" and delete its directory/index?'))return;r.status='removing';r.message='Removing...';renderRepos();renderStats();await fetch('/api/repos/'+id+'/remove',{method:'POST'});toast('Removed','success');loadRepos();}
 

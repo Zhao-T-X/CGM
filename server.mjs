@@ -592,8 +592,8 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 201, repo);
     }
 
-    // 分支 worktree：GET 列出已有 / POST 触发创建某分支（异步，返回 pending）
-    const wm = pathname.match(/^\/api\/repos\/([^/]+)\/worktree$/);
+    // 分支 worktree：GET 列出 / POST 触发创建 / DELETE 删除某分支（异步，返回 pending）
+    const wm = pathname.match(/^\/api\/repos\/([^/]+)\/worktree(?:\/([^/]+))?$/);
     if (wm) {
       const repo = findRepo(wm[1]);
       if (!repo) return sendJson(res, 404, { error: 'no_such_repo' });
@@ -604,6 +604,21 @@ const server = http.createServer(async (req, res) => {
         if (!branch) return sendJson(res, 400, { error: 'missing branch' });
         const result = await opEnsureWorktree(repo, branch);
         return sendJson(res, result.ready ? 200 : 202, { branch, status: (repo.worktrees||[]).find(w=>w.branch===branch)?.status, ...result });
+      }
+      if (req.method === 'DELETE') {
+        const branch = decodeURIComponent(wm[2] || '').trim();
+        if (!branch) return sendJson(res, 400, { error: 'missing branch' });
+        const wt = (repo.worktrees || []).find((w) => w.branch === branch);
+        if (!wt) return sendJson(res, 404, { error: 'no_such_worktree' });
+        // 解锁 worktree（解 SQLite db 锁）→ 删目录 → 从列表移除
+        if (wt.localPath && fsSync.existsSync(wt.localPath)) {
+          await run('git', ['worktree', 'remove', '--force', wt.localPath], { cwd: repo.localPath }).catch(()=>{});
+          await fs.rm(wt.localPath, { recursive: true, force: true }).catch(()=>{});
+          await fs.rm(path.join(repo.localPath, '.git', 'worktrees', sanitize(branch)), { recursive: true, force: true }).catch(()=>{});
+        }
+        repo.worktrees = (repo.worktrees || []).filter((w) => w.branch !== branch);
+        await saveRepos();
+        return sendJson(res, 200, { ok: true, branch });
       }
     }
 
