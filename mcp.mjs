@@ -59,7 +59,7 @@ const MCP_TOOLS = [
   },
   {
     name: 'search_code',
-    description: '检索代码（网关）。指定仓库名和查询语句，内部调用 codegraph 的知识图谱检索符号/文件/调用关系。',
+    description: '检索代码（网关）。指定仓库名和查询语句，内部调用 codegraph 的知识图谱检索符号/文件/调用关系。支持按分支检索：传入 branch 会在该分支的 worktree 索引上检索（首次会后台异步建索引，返回"稍后重试"）。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -70,6 +70,10 @@ const MCP_TOOLS = [
         repo: {
           type: 'string',
           description: '仓库名（精确或模糊，如 "tineco-nmp" 或 "ibu/aftersales"）。省略时自动用第一个已注册仓库。'
+        },
+        branch: {
+          type: 'string',
+          description: '分支名（可选）。指定后在该分支的 worktree 索引上检索；若该分支尚未建索引，后台会异步 fetch+切 worktree+分析，首次调用返回"稍后重试"，再次调用即得结果。'
         },
         maxFiles: {
           type: 'number',
