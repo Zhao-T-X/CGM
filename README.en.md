@@ -12,6 +12,9 @@ Server-side code indexing & management service — unify repositories from multi
 - **Code indexing** — full `clone → analyze → status → remove` pipeline, building symbol / file / call-relationship graphs via CodeGraph
 - **Cross-source search** — one keyword query across all configured providers, merged results with source labels
 - **Local repository support** — ingest an already-cloned local directory (auto-detects Git remote & branch)
+- **Shallow-clone speedup** — `git clone --depth 1` (history isn't needed for code search, ~10x faster clones); branch worktrees use shallow fetch too
+- **Rate-limited index queue** — codegraph init/sync run through a global queue (`QUEUE_CONCURRENCY`, default 2) so concurrent repos don't fight over CPU/IO or trip SQLite db locks (EBUSY)
+- **Real-time status push** — repo status changes are pushed to the UI over SSE (`/mcp` event stream), with a 30s fallback poll as a safety net
 - **MCP server** — `POST /mcp` (Streamable HTTP / JSON-RPC), exposing 4 tools for AI to query code
   - `search_code` — query a repo's code graph (maps `projectPath` internally and calls CodeGraph's native MCP)
 - **Vercel-style dark UI** — near-black theme, minimal whitespace, smooth transitions
@@ -44,7 +47,7 @@ Example (by branch):
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"AuthService loginUser","repo":"tineco-nmp","branch":"dev_ibu","maxFiles":12}}}
 ```
 
-> Multi-branch: repos are cloned fully (not shallow). The default-branch index covers only the default branch; passing `branch` makes the backend `git worktree add` that branch into its own index. The default index is kept clean via `.gitignore` exempting `worktrees/`.
+> Multi-branch: repos are shallow-cloned (`--depth 1` — history isn't needed for code search). The default-branch index covers only the default branch; passing `branch` makes the backend `git worktree add` that branch into its own index. The default index is kept clean via `.gitignore` exempting `worktrees/`.
 
 ## 📦 Dependencies
 
@@ -87,9 +90,10 @@ Go to **http://127.0.0.1:8801**
 |---|---|---|
 | `PORT` | `8801` | Listen port |
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for external access — needs `ADMIN_TOKEN` + reverse proxy) |
-| `DATA_DIR` | `<cwd>/data` | Data directory (`settings.json` holds provider registrations incl. tokens; `repos.json` the repo registry) |
+| `DATA_DIR` | `<cwd>/data` | Data directory (`settings.json` holds provider registrations incl. tokens; `repos.json` the repo registry; cloned repos live under `<DATA_DIR>/repos` by default) |
 | `CODEGRAPH_BIN` | `codegraph` | CodeGraph executable. **On Windows the global install is a bash shim — use the JSON-array form**: `["node","D:/.../npm-shim.js"]` |
 | `SYNC_HOURS` | `6` | Auto-refresh indexed repos (`git pull + codegraph sync`) interval in hours; `0` disables |
+| `QUEUE_CONCURRENCY` | `2` | Global index queue concurrency (throttles codegraph init/sync) |
 | `ADMIN_TOKEN` | — | API access token when exposed externally |
 
 ## 🗂 Directory Structure
@@ -108,14 +112,15 @@ codegraph-manager/
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/api/settings` | GET/PUT | Global config (cloneBaseDir / activeProviderId) |
+| `/healthz` | GET | Liveness probe (returns repo count & uptime, no auth) |
+| `/api/settings` | GET/PUT | Global config (cloneBaseDir / activeProviderId / autoSyncHours) |
 | `/api/providers` | GET/POST | Provider list (token masked) / add |
 | `/api/providers/:id` | PUT/DELETE | Update / delete provider |
 | `/api/providers/check` | POST | Test connection (in-memory, not persisted) |
 | `/api/providers/projects` | GET | Cross-source search (`q=` + `providerId=all`) |
 | `/api/repos` | GET/POST | Repository registry |
 | `/api/repos/local` | POST | Add a local repo |
-| `/api/repos/:id/{clone,analyze,status,remove}` | POST | Repo operations |
+| `/api/repos/:id/{clone,analyze,status,remove,sync}` | POST | Repo operations (clone/analyze/sync return immediately, run async) |
 | `/mcp` | POST(HTTP)/OAuth | MCP endpoint (JSON-RPC 2.0, Streamable HTTP) |
 | `/mcp/message` | POST | MCP SSE message endpoint |
 

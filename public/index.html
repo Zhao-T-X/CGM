@@ -579,7 +579,15 @@ async function doRemove(id){
   toast('Removed','success');loadRepos();
 }
 
-loadSettings();loadRepos();setInterval(loadRepos,4000);
+loadSettings();loadRepos();
+
+/* 实时刷新：服务端 saveRepos 时经 SSE 广播 repos-changed，收到即拉取；30s 无条件兜底轮询（防 SSE 僵尸连接/断连期间卡死状态） */
+let connLive=false;
+const es=new EventSource('/mcp');
+es.addEventListener('repos-changed',()=>loadRepos());
+es.onopen=()=>{connLive=true;};
+es.onerror=()=>{connLive=false;};
+setInterval(loadRepos,30000);
 
 /* 消息弹出层 */
 function showMsg(el,msg){

@@ -19,7 +19,7 @@ import fsSync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { handleMcpMessage, handleSseConnection } from './mcp.mjs';
+import { handleMcpMessage, handleSseConnection, broadcastSse } from './mcp.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOST = process.env.HOST || '127.0.0.1';
@@ -32,6 +32,8 @@ const CODEGRAPH_BIN = (process.env.CODEGRAPH_BIN || 'codegraph').trim();
 
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const REPOS_FILE = path.join(DATA_DIR, 'repos.json');
+// clone 基目录默认收敛进 DATA_DIR：备份/迁移 = 拷一个目录（避免相对 cwd 散落）
+const CLONE_BASE_DIR_DEFAULT = path.join(DATA_DIR, 'repos');
 
 /* ---------------- 日志 ---------------- */
 function log(...a) { console.log(`[${new Date().toISOString()}]`, ...a); }
@@ -82,7 +84,7 @@ const DEFAULT_SPACE = { id: 'all', name: '全部', builtin: true, order: 0 };
 let settings = {
   providers: [],  // [{id, type, name, url, token, createdAt}]
   activeProviderId: '',  // 当前激活的提供商 ID
-  cloneBaseDir: '',
+  cloneBaseDir: CLONE_BASE_DIR_DEFAULT,
   autoSyncHours: null,   // 定时同步频率（小时），null=用 env SYNC_HOURS 或默认 6；0=关闭
   spaces: [DEFAULT_SPACE] // 空间（标签/分组）：[{id,name,builtin?,order}]
 };
@@ -116,6 +118,7 @@ async function loadAll() {
       settings = { ...settings, ...saved };
     }
   } catch {}
+  if (!settings.cloneBaseDir) settings.cloneBaseDir = CLONE_BASE_DIR_DEFAULT; // 兼容旧数据/空值：兜底回 DATA_DIR/repos
   try { repos = JSON.parse(await fs.readFile(REPOS_FILE, 'utf8')); } catch {}
   await healStaleStatus(); // 启动自愈：重置被重启中断的运行中状态
   ensureWorktreesField();  // 兼容旧数据：确保 worktrees 字段存在
@@ -146,6 +149,7 @@ async function saveSettings() {
 async function saveRepos() {
   await ensureDataDir();
   await fs.writeFile(REPOS_FILE, JSON.stringify(repos, null, 2));
+  broadcastSse('repos-changed', { t: Date.now() }); // 推送前端刷新（替代 4s 轮询）
 }
 const RUNNING_STATUSES = ['cloning', 'indexing', 'removing', 'syncing'];
 // 启动自愈：进程被重启中断时，把卡在"运行中状态"的仓库重置为可重试，防永久处理中
@@ -180,6 +184,26 @@ export function parseBin(s) {
   s = (s || '').trim();
   if (s.startsWith('[')) { try { const a = JSON.parse(s); return a.map(String); } catch {} }
   return s.split(/\s+/).filter(Boolean);
+}
+
+/* ---------------- 全局索引队列 ---------------- */
+// codegraph init/sync 是 CPU/IO 密集型，多仓并发会互相抢资源 + 加剧 SQLite db 锁竞争（EBUSY）。
+// 所有重量级索引操作经此队列限流执行（QUEUE_CONCURRENCY 可调，默认 2）。
+const QUEUE_CONCURRENCY = Math.max(1, parseInt(process.env.QUEUE_CONCURRENCY || '2', 10) || 2);
+let queueActive = 0;
+const queueWaiting = [];
+function enqueue(fn) {
+  return new Promise((resolve, reject) => {
+    queueWaiting.push({ fn, resolve, reject });
+    pumpQueue();
+  });
+}
+function pumpQueue() {
+  while (queueActive < QUEUE_CONCURRENCY && queueWaiting.length) {
+    const { fn, resolve, reject } = queueWaiting.shift();
+    queueActive++;
+    Promise.resolve().then(fn).then(resolve, reject).finally(() => { queueActive--; pumpQueue(); });
+  }
 }
 
 /* ---------------- 提供商抽象层 ---------------- */
@@ -321,7 +345,7 @@ async function opClone(repo) {
   await fs.rm(dest, { recursive: true, force: true }).catch(()=>{});
   const provider = getProviderById(repo.providerId) || getActiveProvider();
   const url = provider ? getCloneAuthUrl(repo.gitUrl, provider) : repo.gitUrl;
-  const args = ['clone'];
+  const args = ['clone', '--depth', '1']; // 检索用途不需要历史：浅克隆通常 10x 提速（--depth 隐含 --single-branch）
   if (repo.branch) args.push('--branch', repo.branch);
   args.push(url, dest);
   const r = await run('git', args);
@@ -334,19 +358,23 @@ async function opClone(repo) {
 }
 async function opAnalyze(repo) {
   if (!repo.localPath || !fsSync.existsSync(repo.localPath)) { repo.status = 'failed'; repo.message = 'not cloned'; await saveRepos(); return false; }
-  repo.status = 'indexing'; await saveRepos();
-  const [cmd, ...args] = parseBin(CODEGRAPH_BIN);
-  const r = await run(cmd, [...args, 'init', repo.localPath], { cwd: settings.cloneBaseDir });
-  if (!r.ok) { repo.status = 'failed'; repo.message = (r.err || r.out).slice(-400); await saveRepos(); return false; }
-  repo.status = 'indexed'; repo.message = (r.out || r.err).slice(-400); await saveRepos();
-  return true;
+  repo.status = 'indexing'; repo.message = 'Queued: waiting for index slot...'; await saveRepos();
+  // 经全局队列执行 codegraph init（限流，避免多仓并发抢 CPU/IO + db 锁竞争）
+  return enqueue(async () => {
+    const [cmd, ...args] = parseBin(CODEGRAPH_BIN);
+    const r = await run(cmd, [...args, 'init', repo.localPath], { cwd: settings.cloneBaseDir });
+    repo.status = r.ok ? 'indexed' : 'failed';
+    repo.message = (r.ok ? (r.out || r.err) : (r.err || r.out)).slice(-400);
+    await saveRepos();
+    return r.ok;
+  });
 }
 async function opSync(repo) {
   if (!repo.localPath || !fsSync.existsSync(repo.localPath)) { repo.status = 'failed'; repo.message = 'not cloned'; await saveRepos(); return false; }
   repo.status = 'indexing'; repo.message = 'Pulling & syncing...'; await saveRepos();
-  const pull = await run('git', ['-C', repo.localPath, 'pull']); // 拉取远端变更
+  const pull = await run('git', ['-C', repo.localPath, 'pull']); // 拉取远端变更（浅克隆下 fetch 保持 shallow 边界）
   const [cmd, ...args] = parseBin(CODEGRAPH_BIN);
-  const sc = await run(cmd, [...args, 'sync', repo.localPath], { cwd: settings.cloneBaseDir || '.' }); // 增量重建索引
+  const sc = await enqueue(() => run(cmd, [...args, 'sync', repo.localPath], { cwd: settings.cloneBaseDir })); // 增量重建索引（入队限流）
   repo.status = sc.ok ? 'indexed' : 'failed';
   repo.message = (sc.out || sc.err || pull.err || pull.out || '').slice(-400);
   await saveRepos();
@@ -413,8 +441,8 @@ async function opEnsureWorktree(repo, branch) {
       if (!giContent.split('\n').map(s => s.trim()).includes('worktrees/')) {
         await fs.appendFile(gi, (giContent && !giContent.endsWith('\n') ? '\n' : '') + 'worktrees/\n').catch(()=>{});
       }
-      // fetch 分支引用（若远端无此分支，给出友好提示而非堆 git 原始错误）
-      const fetchR = await run('git', ['fetch', 'origin', `${branch}:refs/remotes/origin/${branch}`], { cwd: repo.localPath });
+      // fetch 分支引用（浅 fetch 保持 shallow 边界；若远端无此分支，给出友好提示而非堆 git 原始错误）
+      const fetchR = await run('git', ['fetch', '--depth', '1', 'origin', `${branch}:refs/remotes/origin/${branch}`], { cwd: repo.localPath });
       if (!fetchR.ok) {
         const errMsg = (fetchR.err || '').toLowerCase();
         if (errMsg.includes('couldn') && errMsg.includes('remote ref')) {
@@ -434,7 +462,7 @@ async function opEnsureWorktree(repo, branch) {
       }
       if (!addR.ok) throw new Error('worktree add failed: ' + (addR.err || addR.out || '').slice(-200));
       const [cmd, ...cargs] = parseBin(CODEGRAPH_BIN);
-      const anR = await run(cmd, [...cargs, 'init', wt.localPath], { cwd: path.dirname(repo.localPath) });
+      const anR = await enqueue(() => run(cmd, [...cargs, 'init', wt.localPath], { cwd: path.dirname(repo.localPath) })); // 入队限流
       wt.status = anR.ok ? 'indexed' : 'failed';
       wt.message = anR.ok ? (anR.out || '').slice(-200) : (anR.err || '').slice(-200);
     } catch (e) {
@@ -452,15 +480,16 @@ async function autoSync() {
   const targets = repos.filter((r) => r.status === 'indexed' && r.localPath);
   if (!targets.length) return;
   log(`auto-sync: ${targets.length} 个已索引仓库 git pull + codegraph sync`);
-  for (const repo of targets) {
+  // 并发 pull（网络型）+ 经队列限流 sync（CPU/IO 型），整体一轮耗时 ~ targets/QUEUE_CONCURRENCY
+  await Promise.all(targets.map(async (repo) => {
     try {
       const pull = await run('git', ['-C', repo.localPath, 'pull']);
       if (!pull.ok) log(`sync pull fail ${repo.name}: ${(pull.err || '').slice(-150)}`);
       const [cmd, ...args] = parseBin(CODEGRAPH_BIN);
-      const sc = await run(cmd, [...args, 'sync', repo.localPath], { cwd: settings.cloneBaseDir || '.' });
+      const sc = await enqueue(() => run(cmd, [...args, 'sync', repo.localPath], { cwd: settings.cloneBaseDir }));
       log(`sync ${repo.name} -> ${sc.ok ? 'ok' : 'fail ' + (sc.err || '').slice(-150)}`);
     } catch (e) { log(`sync error ${repo.name}: ${e.message}`); }
-  }
+  }));
 }
 // 有效同步频率：settings.autoSyncHours（配置页可调）> env SYNC_HOURS > 默认6；0=关闭
 function getSyncHours() {
@@ -483,6 +512,8 @@ const server = http.createServer(async (req, res) => {
   try {
     const pathname = req.url.split('?')[0];
     const query = Object.fromEntries(new URLSearchParams(req.url.split('?')[1] || ''));
+    // 健康检查（无鉴权，供 systemd/探针/监控）
+    if (pathname === '/healthz') return sendJson(res, 200, { ok: true, repos: repos.length, uptime: Math.round(process.uptime()) });
     if (!pathname.startsWith('/api/')) {
       // MCP 端点
       if (pathname === '/mcp') {
@@ -504,7 +535,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/settings' && req.method === 'PUT') {
       const b = await readBody(req);
       // 只更新全局字段，providers 通过专用端点管理
-      if (b.cloneBaseDir !== undefined) settings.cloneBaseDir = b.cloneBaseDir;
+      if (b.cloneBaseDir !== undefined) settings.cloneBaseDir = String(b.cloneBaseDir || '').trim() || CLONE_BASE_DIR_DEFAULT;
       if (b.activeProviderId !== undefined) settings.activeProviderId = b.activeProviderId;
       if (b.autoSyncHours !== undefined) {
         settings.autoSyncHours = (b.autoSyncHours === null || b.autoSyncHours === '') ? null : Number(b.autoSyncHours);

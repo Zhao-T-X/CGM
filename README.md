@@ -19,6 +19,9 @@
 - **跨仓聚合检索**：`search_code` 不指定 repo 时并发检索所有已索引仓库，命中数排序 + 每仓收敛 + 总量 cap，避免上下文爆炸
 - **启动自愈**：重启后中断的 `cloning/indexing/removing/syncing` 状态自动重置为可重试
 - **定时同步**：Settings 页可配置自动同步频率（小时），0 关闭，保存即重建定时器
+- **浅克隆提速**：`git clone --depth 1`（检索无需历史，clone 提速 10x 级），worktree 分支同样浅 fetch
+- **索引限流队列**：codegraph init/sync 经全局队列限流（`QUEUE_CONCURRENCY`，默认 2），多仓并发不抢 CPU/IO，避免 SQLite db 锁竞争（EBUSY）
+- **实时状态推送**：仓库状态变更经 SSE（`/mcp` 事件流）实时推送前端，30s 兜底轮询防连接僵尸
 - **克隆健壮性**：clone 前清理残留目录，避免 `already exists` 失败
 - **MCP 服务器**：`POST /mcp`（Streamable HTTP / JSON-RPC），暴露 4 个工具让 AI 检索代码
   - `search_code` —— 指定仓库（及可选分支）检索代码图谱（内部经 projectPath 映射调用 CodeGraph 原生 MCP）
@@ -52,7 +55,7 @@
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"AuthService loginUser","repo":"tineco-nmp","branch":"dev_ibu","maxFiles":12}}}
 ```
 
-> 多分支说明：仓库默认全量克隆（非浅克隆），主仓库索引只含默认分支；指定 `branch` 时后端自动 `git worktree add` 切出该分支并独立建索引，主索引通过 `.gitignore` 豁免 `worktrees/` 不被污染。
+> 多分支说明：仓库默认浅克隆（`--depth 1`，检索无需历史），主仓库索引只含默认分支；指定 `branch` 时后端自动 `git worktree add` 切出该分支并独立建索引，主索引通过 `.gitignore` 豁免 `worktrees/` 不被污染。
 
 ## 📦 依赖
 
@@ -95,9 +98,10 @@ PORT=8801 DATA_DIR=/srv/cgm-data CODEGRAPH_BIN=codegraph node server.mjs
 |---|---|---|
 | `PORT` | `8801` | 监听端口 |
 | `HOST` | `127.0.0.1` | 监听地址（`0.0.0.0` 对外开放，需配 `ADMIN_TOKEN` + 反代） |
-| `DATA_DIR` | `<工作目录>/data` | 数据目录（`settings.json` 含提供商注册 + token，`repos.json` 仓库注册表） |
+| `DATA_DIR` | `<工作目录>/data` | 数据目录（`settings.json` 含提供商注册 + token，`repos.json` 仓库注册表；克隆仓库默认存于 `<DATA_DIR>/repos`） |
 | `CODEGRAPH_BIN` | `codegraph` | CodeGraph 可执行。**Windows 全局安装是 bash shim，必须用 JSON 数组形式**：`["node","D:/.../npm-shim.js"]` |
 | `SYNC_HOURS` | `6` | 已索引仓库定时 `git pull + codegraph sync` 保新鲜（小时），`0` 关闭 |
+| `QUEUE_CONCURRENCY` | `2` | 全局索引队列并发数（codegraph init/sync 限流） |
 | `ADMIN_TOKEN` | — | 对外开放时 API 访问令牌 |
 
 ## 🗂 目录结构
@@ -115,14 +119,15 @@ codegraph-manager/
 
 | 端点 | 方法 | 说明 |
 |---|---|---|
-| `/api/settings` | GET/PUT | 全局配置（cloneBaseDir / activeProviderId） |
+| `/healthz` | GET | 存活探针（返回仓库数与运行时长，无鉴权） |
+| `/api/settings` | GET/PUT | 全局配置（cloneBaseDir / activeProviderId / autoSyncHours） |
 | `/api/providers` | GET/POST | 提供商列表（token 脱敏）/ 新增 |
 | `/api/providers/:id` | PUT/DELETE | 更新 / 删除提供商 |
 | `/api/providers/check` | POST | 测试连接（内存校验，不落盘） |
 | `/api/providers/projects` | GET | 跨源搜索项目（`q=`+`providerId=all`） |
 | `/api/repos` | GET/POST | 仓库注册表 |
 | `/api/repos/local` | POST | 添加本地仓库 |
-| `/api/repos/:id/{clone,analyze,status,remove}` | POST | 仓库操作 |
+| `/api/repos/:id/{clone,analyze,status,remove,sync}` | POST | 仓库操作（clone/analyze/sync 立即返回，后台异步执行） |
 | `/mcp` | POST(HTTP)/OAuth | MCP 端点（JSON-RPC 2.0，Streamable HTTP） |
 | `/mcp/message` | POST | MCP SSE 消息端点 |
 

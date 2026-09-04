@@ -93,6 +93,13 @@ function sendSseEvent(res, event, data) {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
+// 向所有 SSE 客户端广播事件（server.mjs 用于 repos-changed 推送）
+export function broadcastSse(event, data) {
+  for (const client of sseClients) {
+    try { sendSseEvent(client, event, data); } catch { sseClients.delete(client); }
+  }
+}
+
 // 处理 SSE 连接
 export function handleSseConnection(req, res) {
   // 设置 SSE 头
