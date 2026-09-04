@@ -35,13 +35,10 @@
   .nav-pill:hover{color:var(--text-secondary);background:var(--bg-card-hover)}
   .nav-pill.active{color:var(--text-primary);background:var(--bg-elevated);box-shadow:0 1px 2px rgba(0,0,0,.3)}
   .spacer{flex:1}
-  .space-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:10px 4px 12px;border-bottom:1px solid var(--border);margin-bottom:4px}
-  .space-pill{padding:5px 12px;border-radius:999px;font-size:12.5px;font-weight:500;color:var(--text-tertiary);background:var(--bg-card);border:1px solid var(--border);cursor:pointer;transition:all var(--transition)}
-  .space-pill:hover{color:var(--text-secondary);border-color:var(--text-quaternary)}
-  .space-pill.active{color:#fff;background:var(--accent);border-color:var(--accent)}
-  .space-pill .count{opacity:.6;margin-left:5px;font-size:11px}
-  .space-add{width:24px;height:24px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:16px;color:var(--text-tertiary);background:var(--bg-card);border:1px solid var(--border);cursor:pointer;transition:all var(--transition)}
-  .space-add:hover{color:var(--accent);border-color:var(--accent)}
+  .space-select{position:relative}
+  .space-select select{appearance:none;background:var(--bg-card);border:1px solid var(--border);color:var(--text-secondary);font-size:13px;font-weight:500;padding:6px 30px 6px 12px;border-radius:var(--radius-md);cursor:pointer;transition:all var(--transition);background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239ca3af' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>");background-repeat:no-repeat;background-position:right 10px center}
+  .space-select select:hover{border-color:var(--text-quaternary);color:var(--text-primary)}
+  .space-select select:focus{outline:none;border-color:var(--accent)}
   .status-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:var(--radius-md);font-size:12px;font-weight:500;border:1px solid var(--border);color:var(--text-secondary);background:var(--bg-card)}
   .status-badge .dot{width:6px;height:6px;border-radius:50%;background:var(--text-quaternary)}
   .status-badge.connected{color:var(--success);border-color:rgba(34,197,94,.3);background:var(--success-dim)}
@@ -173,6 +170,11 @@
       <button class="nav-pill" data-view="settings">Settings</button>
     </div>
     <div class="spacer"></div>
+    <div class="space-select">
+      <select id="spaceSelect" onchange="onSpaceSelect(this.value)" title="切换空间">
+        <option value="all">全部</option>
+      </select>
+    </div>
     <div class="status-badge" id="connStatus"><span class="dot"></span><span id="connText">No provider</span></div>
     <button class="icon-btn" onclick="loadRepos()" title="Refresh"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg></button>
   </div></nav>
@@ -207,7 +209,6 @@
         <div id="searchArea" class="empty-state"><p>Enter a project name and click Search, or add a local repository</p></div>
       </div>
       <div class="card"><div class="card-header"><div><div class="card-title">Repository List</div><div style="font-size:13px;color:var(--text-tertiary);margin-top:2px" id="repoCount"></div></div></div>
-        <div class="space-bar" id="spaceBar"></div>
         <div class="table-wrap"><table class="table"><thead><tr><th>Repository</th><th>Path</th><th>Status</th><th>Actions</th><th>Message</th></tr></thead><tbody id="repoTbody"></tbody></table></div>
         <div class="empty-state" id="repoEmpty"><p>No repositories yet. Add a provider in Settings first.</p></div>
       </div>
@@ -461,18 +462,34 @@ async function addSelected() {
 
 /* 空间 */
 async function loadSpaces(){spaces=await api('/api/spaces');renderSpaces();}
-function renderSpaces(){
-  const bar=$('spaceBar');if(!bar)return;
-  const sorted=[...spaces].sort((a,b)=>(a.order??0)-(b.order??0));
-  const countFor=id=>id==='all'?repos.length:repos.filter(r=>(r.spaceIds||[]).includes(id)).length;
-  bar.innerHTML=sorted.map(s=>`<span class="space-pill ${currentSpace===s.id?'active':''}" onclick="switchSpace('${s.id}')">${esc(s.name)}<span class="count">${countFor(s.id)}</span></span>`).join('')
-    + `<span class="space-add" onclick="addSpace()" title="新增空间">+</span>`;
+function switchView(view){
+  document.querySelectorAll('.nav-pill').forEach(x=>x.classList.toggle('active',x.dataset.view===view));
+  document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active',v.id==='view-'+view));
 }
-async function switchSpace(id){currentSpace=id;renderSpaces();loadRepos();}
+function renderSpaces(){
+  const sel=$('spaceSelect');if(!sel)return;
+  const sorted=[...spaces].sort((a,b)=>(a.order??0)-(b.order??0));
+  sel.innerHTML=sorted.map(s=>`<option value="${s.id}" ${currentSpace===s.id?'selected':''}>${esc(s.name)}</option>`).join('');
+  sel.value=currentSpace;
+}
+async function onSpaceSelect(id){currentSpace=id;renderSpaces();switchView('repos');await loadRepos();}
+// 新增空间弹窗（可同时绑定已有仓库）
 async function addSpace(){
   const name=prompt('新空间名称（如 售后 / 曼宁 / 基础设施）：');if(!name||!name.trim())return;
   const r=await api('/api/spaces',{method:'POST',body:JSON.stringify({name:name.trim()})});
-  if(r.id){toast('空间已创建','success');await loadSpaces();}else if(r.error){toast(r.error,'error');}
+  if(!r.id){toast(r.error||'创建失败','error');return;}
+  toast('空间已创建','success');
+  // 弹出已有仓库多选，绑定到新空间
+  const list=await api('/api/repos');
+  if(list.length){
+    const picks=prompt('可选：绑定已有仓库（输入仓库序号，逗号分隔；留空跳过）：\n'+list.map((x,i)=>`${i+1}. ${x.name}`).join('\n'));
+    if(picks&&picks.trim()){
+      const idxs=picks.split(/[,\s]+/).map(s=>parseInt(s,10)-1).filter(i=>i>=0&&i<list.length);
+      for(const i of idxs){await api(`/api/spaces/${r.id}/repos`,{method:'POST',body:JSON.stringify({repoId:list[i].id})});}
+      if(idxs.length)toast(`已绑定 ${idxs.length} 个仓库`,'success');
+    }
+  }
+  await loadSpaces();
 }
 
 /* 仓库 */
