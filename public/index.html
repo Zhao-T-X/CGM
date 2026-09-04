@@ -35,6 +35,13 @@
   .nav-pill:hover{color:var(--text-secondary);background:var(--bg-card-hover)}
   .nav-pill.active{color:var(--text-primary);background:var(--bg-elevated);box-shadow:0 1px 2px rgba(0,0,0,.3)}
   .spacer{flex:1}
+  .space-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:10px 4px 12px;border-bottom:1px solid var(--border);margin-bottom:4px}
+  .space-pill{padding:5px 12px;border-radius:999px;font-size:12.5px;font-weight:500;color:var(--text-tertiary);background:var(--bg-card);border:1px solid var(--border);cursor:pointer;transition:all var(--transition)}
+  .space-pill:hover{color:var(--text-secondary);border-color:var(--text-quaternary)}
+  .space-pill.active{color:#fff;background:var(--accent);border-color:var(--accent)}
+  .space-pill .count{opacity:.6;margin-left:5px;font-size:11px}
+  .space-add{width:24px;height:24px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:16px;color:var(--text-tertiary);background:var(--bg-card);border:1px solid var(--border);cursor:pointer;transition:all var(--transition)}
+  .space-add:hover{color:var(--accent);border-color:var(--accent)}
   .status-badge{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:var(--radius-md);font-size:12px;font-weight:500;border:1px solid var(--border);color:var(--text-secondary);background:var(--bg-card)}
   .status-badge .dot{width:6px;height:6px;border-radius:50%;background:var(--text-quaternary)}
   .status-badge.connected{color:var(--success);border-color:rgba(34,197,94,.3);background:var(--success-dim)}
@@ -200,6 +207,7 @@
         <div id="searchArea" class="empty-state"><p>Enter a project name and click Search, or add a local repository</p></div>
       </div>
       <div class="card"><div class="card-header"><div><div class="card-title">Repository List</div><div style="font-size:13px;color:var(--text-tertiary);margin-top:2px" id="repoCount"></div></div></div>
+        <div class="space-bar" id="spaceBar"></div>
         <div class="table-wrap"><table class="table"><thead><tr><th>Repository</th><th>Path</th><th>Status</th><th>Actions</th><th>Message</th></tr></thead><tbody id="repoTbody"></tbody></table></div>
         <div class="empty-state" id="repoEmpty"><p>No repositories yet. Add a provider in Settings first.</p></div>
       </div>
@@ -302,7 +310,7 @@
 
 <script>
 const $=id=>document.getElementById(id);
-let S={},providers=[],repos=[],selectedSet=new Set(),results=[];
+let S={},providers=[],repos=[],spaces=[{id:'all',name:'全部',builtin:true}],currentSpace='all',selectedSet=new Set(),results=[];
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function toast(msg,type=''){const t=$('toast');t.textContent=msg;t.className='toast show'+(type?' '+type:'');clearTimeout(t._t);t._t=setTimeout(()=>t.className='toast',3000);}
 async function api(p,o={}){const r=await fetch(p,{headers:{'content-type':'application/json'},...o});return r.json();}
@@ -445,23 +453,41 @@ async function addSelected() {
   if (!items.length) return;
   $('btnAdd').disabled = true;
   for (const p of items) {
-    const r = await api('/api/repos', { method: 'POST', body: JSON.stringify({ name: p.name, gitUrl: p.gitUrl, branch: p.defaultBranch || '', providerId: p.providerId, providerType: p.providerType }) });
+    const r = await api('/api/repos', { method: 'POST', body: JSON.stringify({ name: p.name, gitUrl: p.gitUrl, branch: p.defaultBranch || '', providerId: p.providerId, providerType: p.providerType, spaceIds: currentSpace === 'all' ? [] : [currentSpace] }) });
     if (r.id) doOp(r.id, 'clone');
   }
   $('searchArea').className = 'empty-state'; $('searchArea').innerHTML = `<p>Added ${items.length} project(s), cloning & analyzing...</p>`;
 }
 
+/* 空间 */
+async function loadSpaces(){spaces=await api('/api/spaces');renderSpaces();}
+function renderSpaces(){
+  const bar=$('spaceBar');if(!bar)return;
+  const sorted=[...spaces].sort((a,b)=>(a.order??0)-(b.order??0));
+  const countFor=id=>id==='all'?repos.length:repos.filter(r=>(r.spaceIds||[]).includes(id)).length;
+  bar.innerHTML=sorted.map(s=>`<span class="space-pill ${currentSpace===s.id?'active':''}" onclick="switchSpace('${s.id}')">${esc(s.name)}<span class="count">${countFor(s.id)}</span></span>`).join('')
+    + `<span class="space-add" onclick="addSpace()" title="新增空间">+</span>`;
+}
+async function switchSpace(id){currentSpace=id;renderSpaces();loadRepos();}
+async function addSpace(){
+  const name=prompt('新空间名称（如 售后 / 曼宁 / 基础设施）：');if(!name||!name.trim())return;
+  const r=await api('/api/spaces',{method:'POST',body:JSON.stringify({name:name.trim()})});
+  if(r.id){toast('空间已创建','success');await loadSpaces();}else if(r.error){toast(r.error,'error');}
+}
+
 /* 仓库 */
-async function loadRepos(){repos=await api('/api/repos');renderRepos();renderStats();renderConn();}
+async function loadRepos(){repos=await api('/api/repos');spaces=await api('/api/spaces');renderSpaces();renderRepos();renderStats();renderConn();}
 function renderStats(){
-  const c={total:repos.length,indexed:repos.filter(r=>r.status==='indexed').length,processing:repos.filter(r=>['cloning','indexing','removing'].includes(r.status)).length,failed:repos.filter(r=>r.status==='failed').length};
+  const visible = currentSpace === 'all' ? repos : repos.filter(r => (r.spaceIds || []).includes(currentSpace));
+  const c={total:visible.length,indexed:visible.filter(r=>r.status==='indexed').length,processing:visible.filter(r=>['cloning','indexing','removing'].includes(r.status)).length,failed:visible.filter(r=>r.status==='failed').length};
   $('statTotal').textContent=c.total;$('statIndexed').textContent=c.indexed;$('statProcessing').textContent=c.processing;$('statFailed').textContent=c.failed;
 }
 function renderRepos(){
   const tb=$('repoTbody');tb.innerHTML='';
+  const list = currentSpace === 'all' ? repos : repos.filter(r => (r.spaceIds || []).includes(currentSpace));
   $('repoEmpty').style.display=repos.length?'none':'flex';
-  $('repoCount').textContent=repos.length?repos.length+' repositories':'';
-  repos.forEach(r=>{
+  $('repoCount').textContent=list.length?list.length+' repositories':'';
+  list.forEach(r=>{
     const [cls]=STATUS[r.status]||['',''];
     const msg=r.message||'';
     const shortMsg=msg.length>60?msg.slice(0,60)+'...':msg;

@@ -78,15 +78,18 @@ function decryptToken(t) {
 }
 
 // 默认设置：providers 数组 + 全局配置
+const DEFAULT_SPACE = { id: 'all', name: '全部', builtin: true, order: 0 };
 let settings = {
   providers: [],  // [{id, type, name, url, token, createdAt}]
   activeProviderId: '',  // 当前激活的提供商 ID
   cloneBaseDir: '',
-  autoSyncHours: null   // 定时同步频率（小时），null=用 env SYNC_HOURS 或默认 6；0=关闭
+  autoSyncHours: null,   // 定时同步频率（小时），null=用 env SYNC_HOURS 或默认 6；0=关闭
+  spaces: [DEFAULT_SPACE] // 空间（标签/分组）：[{id,name,builtin?,order}]
 };
-let repos = []; // [{id,name,providerId,providerType,gitUrl,localPath,branch,status,message,addedAt,worktrees:[{branch,localPath,status,message}]}]
+let repos = []; // [{id,name,providerId,providerType,gitUrl,localPath,branch,status,message,addedAt,worktrees:[...],spaceIds:[]}]
 // worktree 状态：registered(待建) / indexing(建+分析中) / indexed(可用) / failed
 function ensureWorktreesField() { for (const r of repos) if (!Array.isArray(r.worktrees)) r.worktrees = []; }
+function ensureSpaceIdsField() { for (const r of repos) if (!Array.isArray(r.spaceIds)) r.spaceIds = []; }
 
 async function loadAll() {
   await ensureDataDir();
@@ -116,6 +119,9 @@ async function loadAll() {
   try { repos = JSON.parse(await fs.readFile(REPOS_FILE, 'utf8')); } catch {}
   await healStaleStatus(); // 启动自愈：重置被重启中断的运行中状态
   ensureWorktreesField();  // 兼容旧数据：确保 worktrees 字段存在
+  ensureSpaceIdsField();   // 兼容旧数据：确保 spaceIds 字段存在
+  if (!Array.isArray(settings.spaces) || !settings.spaces.length) settings.spaces = [DEFAULT_SPACE];
+  if (!settings.spaces.some(s => s.id === 'all')) settings.spaces.unshift(DEFAULT_SPACE);
   // 解密 providers token 回内存明文；检测明文 token（未迁移/第三方）→ 迁移为加密落盘
   let needsEncrypt = false;
   settings.providers = settings.providers.map(p => {
@@ -504,6 +510,63 @@ const server = http.createServer(async (req, res) => {
       await saveSettings(); return sendJson(res, 200, settings);
     }
 
+    // 空间（标签/分组）CRUD
+    if (pathname === '/api/spaces' && req.method === 'GET') {
+      const sorted = [...settings.spaces].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      return sendJson(res, 200, sorted);
+    }
+    if (pathname === '/api/spaces' && req.method === 'POST') {
+      const b = await readBody(req);
+      const name = (b.name || '').trim();
+      if (!name) return sendJson(res, 400, { error: 'missing name' });
+      if (settings.spaces.some(s => s.name === name)) return sendJson(res, 409, { error: 'space exists' });
+      const space = { id: crypto.randomUUID(), name, builtin: false, order: (settings.spaces.reduce((m, s) => Math.max(m, s.order ?? 0), 0) + 1) };
+      settings.spaces.push(space);
+      await saveSettings();
+      return sendJson(res, 201, space);
+    }
+    const spm = pathname.match(/^\/api\/spaces\/([^/]+)$/);
+    if (spm) {
+      const space = settings.spaces.find(s => s.id === spm[1]);
+      if (!space) return sendJson(res, 404, { error: 'no_such_space' });
+      if (req.method === 'PUT') {
+        const b = await readBody(req);
+        if (b.name !== undefined && !space.builtin) space.name = (b.name || '').trim() || space.name;
+        if (b.order !== undefined) space.order = Number(b.order);
+        await saveSettings();
+        return sendJson(res, 200, space);
+      }
+      if (req.method === 'DELETE') {
+        if (space.builtin) return sendJson(res, 400, { error: 'cannot delete builtin space' });
+        // 解除所有仓库对该空间的绑定
+        for (const r of repos) r.spaceIds = (r.spaceIds || []).filter(id => id !== space.id);
+        settings.spaces = settings.spaces.filter(s => s.id !== space.id);
+        await saveRepos(); await saveSettings();
+        return sendJson(res, 200, { ok: true });
+      }
+    }
+    // 空间 ↔ 仓库绑定
+    const spbind = pathname.match(/^\/api\/spaces\/([^/]+)\/repos$/);
+    if (spbind && req.method === 'POST') {
+      const space = settings.spaces.find(s => s.id === spbind[1]);
+      if (!space) return sendJson(res, 404, { error: 'no_such_space' });
+      const b = await readBody(req);
+      const repoId = b.repoId;
+      const repo = repos.find(r => r.id === repoId);
+      if (!repo) return sendJson(res, 404, { error: 'no_such_repo' });
+      repo.spaceIds = [...new Set([...(repo.spaceIds || []), space.id])];
+      await saveRepos();
+      return sendJson(res, 200, repo);
+    }
+    const spunbind = pathname.match(/^\/api\/spaces\/([^/]+)\/repos\/([^/]+)$/);
+    if (spunbind && req.method === 'DELETE') {
+      const repo = repos.find(r => r.id === spunbind[2]);
+      if (!repo) return sendJson(res, 404, { error: 'no_such_repo' });
+      repo.spaceIds = (repo.spaceIds || []).filter(id => id !== spunbind[1]);
+      await saveRepos();
+      return sendJson(res, 200, repo);
+    }
+
     // 提供商 CRUD
     if (pathname === '/api/providers' && req.method === 'GET') {
       // 返回提供商列表（隐藏 token）
@@ -586,8 +649,17 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/repos' && req.method === 'GET') return sendJson(res, 200, repos);
     if (pathname === '/api/repos' && req.method === 'POST') {
       const b = await readBody(req);
+      const spaceIds = Array.isArray(b.spaceIds) ? b.spaceIds : (b.spaceId ? [b.spaceId] : []);
+      // 去重：同 gitUrl 且已存在 → 仅追加空间绑定关系，不重复注册
+      const existing = b.gitUrl && repos.find(r => r.gitUrl === b.gitUrl && r.providerId === (b.providerId || settings.activeProviderId));
+      if (existing) {
+        const before = (existing.spaceIds || []).slice();
+        existing.spaceIds = [...new Set([...(existing.spaceIds || []), ...spaceIds])];
+        await saveRepos();
+        return sendJson(res, 200, { ...existing, _dedup: true, addedSpaces: existing.spaceIds.filter(id => !before.includes(id)) });
+      }
       const id = crypto.randomUUID();
-      const repo = { id, name: b.name, providerId: b.providerId || settings.activeProviderId, providerType: b.providerType || '', gitUrl: b.gitUrl, branch: b.branch || '', localPath: null, status: 'registered', message: '', addedAt: Date.now(), worktrees: [] };
+      const repo = { id, name: b.name, providerId: b.providerId || settings.activeProviderId, providerType: b.providerType || '', gitUrl: b.gitUrl, branch: b.branch || '', localPath: null, status: 'registered', message: '', addedAt: Date.now(), worktrees: [], spaceIds };
       repos.push(repo); await saveRepos();
       return sendJson(res, 201, repo);
     }
