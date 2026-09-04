@@ -564,7 +564,20 @@ async function doWt(id){const br=prompt('输入要切出的分支名（远程已
 // 删除单个分支 worktree
 async function doWtRemove(id,branch){if(!confirm('删除分支 "'+branch+'" 的 worktree 索引？'))return;const r=repos.find(x=>x.id===id);if(r){const w=(r.worktrees||[]).find(x=>x.branch===branch);if(w){w.status='removing';w.message='Removing...';renderRepos();}}await fetch('/api/repos/'+id+'/worktree/'+encodeURIComponent(branch),{method:'DELETE'});toast('Branch "'+branch+'" removed','success');loadRepos();}
 async function doOp(id,op){const r=repos.find(x=>x.id===id);if(r){r.status=op==='clone'?'cloning':(op==='analyze'||op==='sync')?'indexing':'registered';r.message='Processing...';renderRepos();renderStats();}fetch('/api/repos/'+id+'/'+op,{method:'POST'});}
-async function doRemove(id){const r=repos.find(x=>x.id===id);if(!confirm('Remove "'+r.name+'" and delete its directory/index?'))return;r.status='removing';r.message='Removing...';renderRepos();renderStats();await fetch('/api/repos/'+id+'/remove',{method:'POST'});toast('Removed','success');loadRepos();}
+async function doRemove(id){
+  const r=repos.find(x=>x.id===id);if(!r)return;
+  const spaceIds=(r.spaceIds||[]);
+  // 在当前具体空间下且还绑了其他空间 → 只解除与该空间的关系，不删仓库
+  if(currentSpace!=='all' && spaceIds.length>1){
+    if(!confirm('仓库「'+r.name+'」还属于其他空间，仅从当前空间移除绑定关系？'))return;
+    await fetch(`/api/spaces/${currentSpace}/repos/${id}`,{method:'DELETE'});
+    toast('已从当前空间移除绑定','success');loadRepos();return;
+  }
+  if(!confirm('Remove "'+r.name+'" and delete its directory/index?'))return;
+  r.status='removing';r.message='Removing...';renderRepos();renderStats();
+  await fetch('/api/repos/'+id+'/remove',{method:'POST'});
+  toast('Removed','success');loadRepos();
+}
 
 loadSettings();loadRepos();setInterval(loadRepos,4000);
 

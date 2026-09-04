@@ -122,6 +122,9 @@ async function loadAll() {
   ensureSpaceIdsField();   // 兼容旧数据：确保 spaceIds 字段存在
   if (!Array.isArray(settings.spaces) || !settings.spaces.length) settings.spaces = [DEFAULT_SPACE];
   if (!settings.spaces.some(s => s.id === 'all')) settings.spaces.unshift(DEFAULT_SPACE);
+  // 清理 repos.spaceIds 中的脏值（null / 指向已不存在空间的 id）
+  const validSpaceIds = new Set(settings.spaces.map(s => s.id));
+  for (const r of repos) r.spaceIds = (r.spaceIds || []).filter(id => validSpaceIds.has(id));
   // 解密 providers token 回内存明文；检测明文 token（未迁移/第三方）→ 迁移为加密落盘
   let needsEncrypt = false;
   settings.providers = settings.providers.map(p => {
