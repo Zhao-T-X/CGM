@@ -25,6 +25,7 @@
 - **克隆健壮性**：clone 前清理残留目录，避免 `already exists` 失败
 - **MCP 服务器**：`POST /mcp`（Streamable HTTP / JSON-RPC），暴露 4 个工具让 AI 检索代码
   - `search_code` —— 指定仓库（及可选分支）检索代码图谱（内部经 projectPath 映射调用 CodeGraph 原生 MCP）
+- **CLI 一键启动**：`npm i -g .` 后任意目录 `cgm` 即起（`node cli.mjs` 等价）；`CODEGRAPH_BIN` 自动探测（PATH 里的 codegraph → npm 全局 shim），Windows 不再需要手配 JSON 数组
 - **Vercel 风深色 UI**：纯黑底 + 极简留白 + 平滑动效
 
 ## 📸 界面截图
@@ -72,14 +73,23 @@
 npm i -g @colbymchenry/codegraph
 ```
 
-### 2. 启动服务
+### 2. 启动服务（一键）
 ```bash
-# Windows
-env PORT=8801 DATA_DIR="E:/workspace/cgm-data" CODEGRAPH_BIN='["node","D:/Program Files/nodejs/node_modules/@colbymchenry/codegraph/npm-shim.js"]' node server.mjs
+npm i -g codegraph-manager   # 方式一：安装 npm 发布版
+npm i -g .                   # 方式二：在本项目根目录装成全局命令（效果同上）
+cgm                          # 任意目录一键启动：自动探测 codegraph，零配置
 
-# Linux
-PORT=8801 DATA_DIR=/srv/cgm-data CODEGRAPH_BIN=codegraph node server.mjs
+# 不装全局的等价方式
+node cli.mjs      # 或 node server.mjs / npm start
 ```
+
+常用参数（优先级：命令行参数 > 环境变量 > 默认值）：
+```bash
+cgm --port 9000 --data /srv/cgm-data   # 自定义端口与数据目录
+HOST=0.0.0.0 ADMIN_TOKEN=xxx cgm       # 对外开放（务必配 ADMIN_TOKEN）
+```
+
+> `CODEGRAPH_BIN` 无需手动配置：未设置时自动探测 PATH 里的 `codegraph`，探测不到再找 npm 全局包的 `npm-shim.js`（Windows bash shim 场景自动转 `["node", "<shim>"]` 形式）。仍可 `cgm --codegraph <bin>` 显式覆盖。
 
 ### 3. 访问界面
 打开 **http://127.0.0.1:8801**
@@ -99,18 +109,29 @@ PORT=8801 DATA_DIR=/srv/cgm-data CODEGRAPH_BIN=codegraph node server.mjs
 | `PORT` | `8801` | 监听端口 |
 | `HOST` | `127.0.0.1` | 监听地址（`0.0.0.0` 对外开放，需配 `ADMIN_TOKEN` + 反代） |
 | `DATA_DIR` | `<工作目录>/data` | 数据目录（`settings.json` 含提供商注册 + token，`repos.json` 仓库注册表；克隆仓库默认存于 `<DATA_DIR>/repos`） |
-| `CODEGRAPH_BIN` | `codegraph` | CodeGraph 可执行。**Windows 全局安装是 bash shim，必须用 JSON 数组形式**：`["node","D:/.../npm-shim.js"]` |
+| `CODEGRAPH_BIN` | 自动探测 | CodeGraph 可执行：先探 PATH 里的 `codegraph`，再找 npm 全局包 `npm-shim.js`（Windows bash shim 自动转 `["node","<shim>"]`）。仍可显式指定：绝对路径或 JSON 数组形式 |
 | `SYNC_HOURS` | `6` | 已索引仓库定时 `git pull + codegraph sync` 保新鲜（小时），`0` 关闭 |
 | `QUEUE_CONCURRENCY` | `2` | 全局索引队列并发数（codegraph init/sync 限流） |
 | `ADMIN_TOKEN` | — | 对外开放时 API 访问令牌 |
+
+## 🚢 发布（维护者）
+
+推送 `v*` tag 触发 GitHub Actions 自动发布到 npm（`publish` job：tag 与 `package.json` 版本一致性校验 → `npm pack --dry-run` 预览 → `npm publish --provenance`）。前提：仓库 Settings → Secrets and variables → Actions 配置 `NPM_TOKEN`（npmjs.com 生成的 Automation Token）。
+
+```bash
+npm version patch   # 或 minor / major：更新 package.json 并自动创建 tag
+git push --follow-tags
+```
 
 ## 🗂 目录结构
 
 ```
 codegraph-manager/
+├── cli.mjs            CLI 入口（cgm 命令：一键启动，参数 > env > 默认值）
 ├── server.mjs         零依赖 HTTP 后端（提供商 CRUD、仓库操作、/mcp 路由、静态服务）
 ├── mcp.mjs            MCP 服务器模块（4 工具 + CodeGraph stdio 网关客户端）
 ├── public/index.html  Vercel 风前端（single-file）
+├── package.json       元数据（bin: cgm / npm start；private，零依赖）
 ├── DEPLOY-Linux.md    Linux systemd/systemd 部署说明
 └── .gitignore         排除 data/ 敏感数据
 ```

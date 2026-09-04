@@ -1,0 +1,26 @@
+{
+  "name": "codegraph-manager",
+  "version": "1.0.0",
+  "description": "多 Git 平台仓库统一管理 + CodeGraph 代码知识图谱 + MCP 接口供 AI 检索代码（零依赖，仅 Node 内置模块）",
+  "license": "MIT",
+  "files": [
+    "cli.mjs",
+    "server.mjs",
+    "mcp.mjs",
+    "verify-mcp.mjs",
+    "public/index.html",
+    "README.en.md",
+    "DEPLOY-Linux.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "cgm": "./cli.mjs"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "verify": "node verify-mcp.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

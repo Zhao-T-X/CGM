@@ -17,6 +17,7 @@ Server-side code indexing & management service — unify repositories from multi
 - **Real-time status push** — repo status changes are pushed to the UI over SSE (`/mcp` event stream), with a 30s fallback poll as a safety net
 - **MCP server** — `POST /mcp` (Streamable HTTP / JSON-RPC), exposing 4 tools for AI to query code
   - `search_code` — query a repo's code graph (maps `projectPath` internally and calls CodeGraph's native MCP)
+- **One-command CLI** — `npm i -g .` then run `cgm` from anywhere (or `node cli.mjs`); `CODEGRAPH_BIN` is auto-detected (PATH `codegraph` → npm global shim), so Windows no longer needs the JSON-array incantation
 - **Vercel-style dark UI** — near-black theme, minimal whitespace, smooth transitions
 
 ## 📸 Screenshots
@@ -64,14 +65,23 @@ Example (by branch):
 npm i -g @colbymchenry/codegraph
 ```
 
-### 2. Start the service
+### 2. Start the service (one command)
 ```bash
-# Windows
-env PORT=8801 DATA_DIR="E:/workspace/cgm-data" CODEGRAPH_BIN='["node","D:/Program Files/nodejs/node_modules/@colbymchenry/codegraph/npm-shim.js"]' node server.mjs
+npm i -g codegraph-manager   # option 1: install the published npm package
+npm i -g .                   # option 2: install from this repo root as a global command
+cgm                          # start from anywhere: auto-detects codegraph, zero config
 
-# Linux
-PORT=8801 DATA_DIR=/srv/cgm-data CODEGRAPH_BIN=codegraph node server.mjs
+# equivalent without global install
+node cli.mjs      # or node server.mjs / npm start
 ```
+
+Common options (priority: CLI args > env vars > defaults):
+```bash
+cgm --port 9000 --data /srv/cgm-data   # custom port & data dir
+HOST=0.0.0.0 ADMIN_TOKEN=xxx cgm       # expose externally (always set ADMIN_TOKEN)
+```
+
+> `CODEGRAPH_BIN` needs no manual setup: when unset, the server probes PATH for `codegraph`, then falls back to the npm global package's `npm-shim.js` (on Windows, where the global install is a bash shim, it automatically uses the `["node","<shim>"]` form). Override explicitly with `cgm --codegraph <bin>` if needed.
 
 ### 3. Open the UI
 Go to **http://127.0.0.1:8801**
@@ -91,19 +101,30 @@ Go to **http://127.0.0.1:8801**
 | `PORT` | `8801` | Listen port |
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` for external access — needs `ADMIN_TOKEN` + reverse proxy) |
 | `DATA_DIR` | `<cwd>/data` | Data directory (`settings.json` holds provider registrations incl. tokens; `repos.json` the repo registry; cloned repos live under `<DATA_DIR>/repos` by default) |
-| `CODEGRAPH_BIN` | `codegraph` | CodeGraph executable. **On Windows the global install is a bash shim — use the JSON-array form**: `["node","D:/.../npm-shim.js"]` |
+| `CODEGRAPH_BIN` | auto-detected | CodeGraph executable: probes PATH for `codegraph` first, then the npm global package's `npm-shim.js` (Windows bash shim auto-converts to `["node","<shim>"]`). Explicitly settable as an absolute path or JSON-array form |
 | `SYNC_HOURS` | `6` | Auto-refresh indexed repos (`git pull + codegraph sync`) interval in hours; `0` disables |
 | `QUEUE_CONCURRENCY` | `2` | Global index queue concurrency (throttles codegraph init/sync) |
 | `ADMIN_TOKEN` | — | API access token when exposed externally |
+
+## 🚢 Publishing (maintainers)
+
+Pushing a `v*` tag triggers GitHub Actions to publish to npm automatically (the `publish` job: tag ↔ `package.json` version check → `npm pack --dry-run` preview → `npm publish --provenance`). Prerequisite: add an `NPM_TOKEN` secret (Automation Token from npmjs.com) under repo Settings → Secrets and variables → Actions.
+
+```bash
+npm version patch   # or minor / major: bumps package.json and creates the tag
+git push --follow-tags
+```
 
 ## 🗂 Directory Structure
 
 ```
 codegraph-manager/
+├── cli.mjs            CLI entry (the `cgm` command: one-command start; args > env > defaults)
 ├── server.mjs         zero-dep HTTP backend (provider CRUD, repo ops, /mcp routes, static serving)
 ├── mcp.mjs            MCP module (4 tools + CodeGraph stdio gateway client)
 ├── public/index.html  Vercel-style frontend (single-file)
 ├── public/img/        UI screenshots
+├── package.json       metadata (bin: cgm / npm start; private, zero deps)
 ├── DEPLOY-Linux.md    Linux systemd deployment guide
 └── .gitignore         excludes data/ secrets
 ```

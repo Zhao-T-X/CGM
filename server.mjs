@@ -8,12 +8,12 @@
 //   HOST / PORT        监听地址端口（默认 127.0.0.1 / 8801）
 //   DATA_DIR           数据目录（settings.json + repos.json 存放，默认 ./data）
 //   ADMIN_TOKEN        可选：管理界面/API 的 Bearer 令牌（为空则仅限本机访问不作鉴权）
-//   CODEGRAPH_BIN      codegraph 可执行（默认 'codegraph'，可给绝对路径或命令串）
+//   CODEGRAPH_BIN      codegraph 可执行（未设置时自动探测：PATH 里的 codegraph → npm 全局包 shim）
 // 数据：
 //   <DATA_DIR>/settings.json   提供商配置列表 + clone 基目录
 //   <DATA_DIR>/repos.json      仓库注册表（clone 路径、分析状态）
 import http from 'node:http';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import fsSync from 'node:fs';
 import path from 'node:path';
@@ -28,7 +28,29 @@ const DATA_DIR = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
   : path.join(HERE, 'data');
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
-const CODEGRAPH_BIN = (process.env.CODEGRAPH_BIN || 'codegraph').trim();
+
+// CODEGRAPH_BIN 解析：显式配置原样保留（含 JSON 数组形式）；未设置时自动探测——
+// 1) PATH 里的 codegraph（Linux install.sh 方式）；2) npm 全局包 @colbymchenry/codegraph 的
+// npm-shim.js（Windows 全局装是 bash shim，PATH 调不通）→ 转 ["node", "<shim>"] 数组形式。
+// 都失败回落 'codegraph'，与旧行为一致。
+function resolveCodegraphBin() {
+  const raw = (process.env.CODEGRAPH_BIN || '').trim();
+  if (raw) return raw;
+  // 探测必须与实际调用方式一致（run() 无 shell 直接 spawn）：
+  // Windows 全局装的 bash shim 经 cmd 包装能通过 shell 探测，直接 spawn 却会失败，故此处不用 shell
+  const probe = spawnSync('codegraph', ['--version'], { timeout: 5000 });
+  if (!probe.error && probe.status === 0) return 'codegraph';
+  try {
+    // npm 本体是 npm.cmd（Windows），root 查询经 shell 执行；无用户输入拼接，无注入面
+    const root = spawnSync('npm', ['root', '-g'], { timeout: 10000, shell: process.platform === 'win32' }).stdout?.toString().trim();
+    if (root) {
+      const shim = path.join(root, '@colbymchenry', 'codegraph', 'npm-shim.js');
+      if (fsSync.existsSync(shim)) return JSON.stringify(['node', shim]);
+    }
+  } catch { /* 探测失败走默认 */ }
+  return 'codegraph';
+}
+const CODEGRAPH_BIN = resolveCodegraphBin();
 
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const REPOS_FILE = path.join(DATA_DIR, 'repos.json');
