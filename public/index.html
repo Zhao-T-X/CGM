@@ -124,6 +124,10 @@
   .search-item-name{font-size:14px;font-weight:500}
   .search-item-url{font-size:12px;color:var(--text-quaternary);font-family:ui-monospace,monospace}
   .search-item-provider{font-size:11px;color:var(--text-tertiary);background:var(--bg-elevated);padding:2px 6px;border-radius:var(--radius-sm);margin-left:auto}
+  .search-item.in-space{opacity:.5;background:var(--bg-card)}
+  .search-item.in-space:hover{opacity:.7}
+  .search-item.in-space .search-item-name{color:var(--text-tertiary)}
+  .in-space-tag{font-size:10.5px;color:var(--text-tertiary);background:var(--bg-elevated);padding:2px 6px;border-radius:var(--radius-sm);margin-left:8px}
 
   .table-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius-lg)}
   .table{width:100%;border-collapse:collapse}
@@ -435,12 +439,15 @@ async function searchProjects(){
   const area=$('searchArea');area.className='empty-state';area.innerHTML='<p>Searching all providers...</p>';
   const r=await api('/api/providers/projects?'+new URLSearchParams({q}));
   if(r.error){toast('Search failed: '+r.error,'error');area.innerHTML='<p>Search failed</p>';return;}
-  // 过滤掉已添加的仓库（按 name 或 gitUrl 匹配）
-  const addedNames = new Set(repos.map(x => x.name));
-  const r2 = r.filter(p => !addedNames.has(p.name) && !repos.some(x => x.gitUrl && x.gitUrl === p.gitUrl));
+  // 标记当前空间已绑定的仓库（过滤"已有仓库"=当前空间已有的），已绑定的排后并灰显
+  const spaceRepos = currentSpace === 'all' ? repos : repos.filter(x => (x.spaceIds || []).includes(currentSpace));
+  const inSpace = new Set(spaceRepos.map(x => x.gitUrl).filter(Boolean));
+  const inSpaceNames = new Set(spaceRepos.map(x => x.name));
+  const r2 = r.map(p => ({ ...p, _inSpace: inSpace.has(p.gitUrl) || inSpaceNames.has(p.name) }))
+              .sort((a, b) => (a._inSpace ? 1 : 0) - (b._inSpace ? 1 : 0));
   results = r2; selectedSet.clear(); updateAddBtn();
-  if (!r2.length) { area.innerHTML = '<p>All matching projects already added</p>'; return; }
-  area.className = 'search-results'; area.innerHTML = r2.map((p, i) => `<div class="search-item ${selectedSet.has(i) ? 'selected' : ''}" onclick="togglePick(${i})"><div class="radio ${selectedSet.has(i) ? 'checked' : ''}"></div><div><div class="search-item-name">${esc(p.name)}</div><div class="search-item-url">${esc(p.gitUrl)}</div></div><div class="search-item-provider">${esc(PROVIDER_LABELS[p.providerType] || p.providerType)}</div></div>`).join('');
+  if (!r2.length) { area.innerHTML = '<p>No matching projects</p>'; return; }
+  area.className = 'search-results'; area.innerHTML = r2.map((p, i) => `<div class="search-item ${selectedSet.has(i) ? 'selected' : ''} ${p._inSpace ? 'in-space' : ''}" onclick="togglePick(${i})"><div class="radio ${selectedSet.has(i) ? 'checked' : ''}"></div><div><div class="search-item-name">${esc(p.name)}</div><div class="search-item-url">${esc(p.gitUrl)}</div></div><div class="search-item-provider">${esc(PROVIDER_LABELS[p.providerType] || p.providerType)}</div>${p._inSpace ? '<span class="in-space-tag">已在该空间</span>' : ''}</div>`).join('');
 }
 function togglePick(i) {
   if (selectedSet.has(i)) selectedSet.delete(i); else selectedSet.add(i);
