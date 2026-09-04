@@ -22,6 +22,28 @@ jobs:
       - name: MCP protocol regression
         run: node verify-mcp.mjs
 
+      # 一键脚本端到端：后台起服务，轮询 /healthz，成功即杀
+      # runner 预装 node/git（验证跳过逻辑），真实执行 codegraph 安装 + cgm link + 启动链路
+      - name: Install script end-to-end (linux)
+        timeout-minutes: 6
+        run: |
+          bash install.sh --port 8879 > /tmp/install.log 2>&1 &
+          PID=$!
+          ok=""
+          for i in $(seq 1 60); do
+            sleep 3
+            if curl -sf http://127.0.0.1:8879/healthz | grep -q '"ok":true'; then
+              echo "healthz OK after ~$((i*3))s"
+              ok=1; break
+            fi
+          done
+          kill $PID 2>/dev/null || true
+          if [ -z "$ok" ]; then
+            echo "--- install.log ---"; cat /tmp/install.log
+            exit 1
+          fi
+          echo "--- install.log (tail) ---"; tail -n 8 /tmp/install.log
+
   # 推送 v* tag 时自动发布到 npm（需在仓库 Secrets 配置 NPM_TOKEN）
   publish:
     if: startsWith(github.ref, 'refs/tags/v')

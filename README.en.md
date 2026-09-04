@@ -66,6 +66,19 @@ npm i -g @colbymchenry/codegraph
 ```
 
 ### 2. Start the service (one command)
+
+**Install script** (installs missing deps — Node.js → git → CodeGraph → cgm — skips what's already there, then starts the server):
+
+```bash
+# Linux / macOS
+bash install.sh --port 8801
+
+# Windows: double-click install.cmd, or
+.\install.cmd --port 8801
+```
+
+**Manual**:
+
 ```bash
 npm i -g codegraph-manager   # option 1: install the published npm package
 npm i -g .                   # option 2: install from this repo root as a global command
@@ -119,12 +132,14 @@ git push --follow-tags
 
 ```
 codegraph-manager/
+├── install.sh         Linux/macOS install script (Node→git→codegraph→cgm→start)
+├── install.cmd/.ps1   Windows install script (install.cmd is the double-click entry)
 ├── cli.mjs            CLI entry (the `cgm` command: one-command start; args > env > defaults)
 ├── server.mjs         zero-dep HTTP backend (provider CRUD, repo ops, /mcp routes, static serving)
 ├── mcp.mjs            MCP module (4 tools + CodeGraph stdio gateway client)
 ├── public/index.html  Vercel-style frontend (single-file)
 ├── public/img/        UI screenshots
-├── package.json       metadata (bin: cgm / npm start; private, zero deps)
+├── package.json       metadata (bin: cgm / npm start; zero deps)
 ├── DEPLOY-Linux.md    Linux systemd deployment guide
 └── .gitignore         excludes data/ secrets
 ```

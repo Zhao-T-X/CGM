@@ -74,6 +74,19 @@ npm i -g @colbymchenry/codegraph
 ```
 
 ### 2. 启动服务（一键）
+
+**一键脚本**（自动安装缺失依赖 Node.js → git → CodeGraph → cgm，已装的自动跳过，装完直接启动）：
+
+```bash
+# Linux / macOS
+bash install.sh --port 8801
+
+# Windows：双击 install.cmd，或
+.\install.cmd --port 8801
+```
+
+**手动方式**：
+
 ```bash
 npm i -g codegraph-manager   # 方式一：安装 npm 发布版
 npm i -g .                   # 方式二：在本项目根目录装成全局命令（效果同上）
@@ -127,11 +140,13 @@ git push --follow-tags
 
 ```
 codegraph-manager/
+├── install.sh         Linux/macOS 一键安装（Node→git→codegraph→cgm→启动）
+├── install.cmd/.ps1   Windows 一键安装（install.cmd 双击入口）
 ├── cli.mjs            CLI 入口（cgm 命令：一键启动，参数 > env > 默认值）
 ├── server.mjs         零依赖 HTTP 后端（提供商 CRUD、仓库操作、/mcp 路由、静态服务）
 ├── mcp.mjs            MCP 服务器模块（4 工具 + CodeGraph stdio 网关客户端）
 ├── public/index.html  Vercel 风前端（single-file）
-├── package.json       元数据（bin: cgm / npm start；private，零依赖）
+├── package.json       元数据（bin: cgm / npm start；零依赖）
 ├── DEPLOY-Linux.md    Linux systemd/systemd 部署说明
 └── .gitignore         排除 data/ 敏感数据
 ```
