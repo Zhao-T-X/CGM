@@ -11,7 +11,7 @@
 
 import { spawn } from 'node:child_process';
 import readline from 'node:readline';
-import { parseBin, opEnsureWorktree } from './server.mjs';
+import { parseBin, opEnsureWorktree, MAX_BODY_BYTES, BASE_PATH } from './server.mjs';
 
 // MCP 工具定义
 const MCP_TOOLS = [
@@ -93,7 +93,8 @@ function sendSseEvent(res, event, data) {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
-// 向所有 SSE 客户端广播事件（server.mjs 用于 repos-changed 推送）
+// 向所有 SSE 客户端广播事件 —— 公共通知专用（如 repos-changed），严禁推送工具结果/请求响应
+// （工具结果只经 HTTP 响应返回给发起方，广播会造成跨客户端数据泄露）
 export function broadcastSse(event, data) {
   for (const client of sseClients) {
     try { sendSseEvent(client, event, data); } catch { sseClients.delete(client); }
@@ -112,8 +113,8 @@ export function handleSseConnection(req, res) {
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID'
   });
 
-  // 发送初始连接事件
-  sendSseEvent(res, 'endpoint', { endpoint: '/mcp/message' });
+  // 发送初始连接事件（带 BASE_PATH 前缀，供反代部署下的 MCP 客户端回投消息）
+  sendSseEvent(res, 'endpoint', { endpoint: BASE_PATH + '/mcp/message' });
 
   // 添加到客户端列表
   sseClients.add(res);
@@ -130,18 +131,12 @@ export function handleSseConnection(req, res) {
   });
 }
 
-// 处理 MCP 消息（通过 POST）
+// 处理 MCP 消息（通过 POST；鉴权与 OPTIONS 预检已由 server.mjs 路由层完成）
 export async function handleMcpMessage(req, res, repos) {
   // 设置 CORS 头（需允许 MCP 协议头，否则浏览器直连预检失败）
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID');
-  
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
 
   if (req.method !== 'POST') {
     res.writeHead(405, { 'Content-Type': 'application/json' });
@@ -149,9 +144,19 @@ export async function handleMcpMessage(req, res, repos) {
     return;
   }
 
-  // 读取请求体
+  // 读取请求体（与 server.mjs readBody 同一大小上限，超限 413，防绕过）
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  let bodySize = 0, bodyTooLarge = false;
+  for await (const chunk of req) {
+    bodySize += chunk.length;
+    if (bodySize > MAX_BODY_BYTES) { bodyTooLarge = true; break; }
+    chunks.push(chunk);
+  }
+  if (bodyTooLarge) {
+    res.writeHead(413, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32700, message: 'Payload too large' }, id: null }));
+    return;
+  }
   const body = Buffer.concat(chunks).toString('utf8');
   
   let request;
@@ -211,19 +216,10 @@ export async function handleMcpMessage(req, res, repos) {
       return;
   }
 
-  // 发送响应
+  // 发送响应（仅返回给发起方；不再经 SSE 广播给其他客户端，防止跨客户端泄露查询结果）
   const response = { jsonrpc: '2.0', result, id };
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(response));
-
-  // 同时通过 SSE 广播给所有连接的客户端
-  for (const client of sseClients) {
-    try {
-      sendSseEvent(client, 'message', response);
-    } catch (e) {
-      sseClients.delete(client);
-    }
-  }
 }
 
 // ── codegraph MCP 网关客户端（stdio）──────────────────────────────

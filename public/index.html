@@ -318,6 +318,22 @@
   </div>
 </div>
 
+<!-- 访问令牌：服务开启鉴权（ADMIN_TOKEN/MCP_TOKEN）且返回 401 时弹出；仅存本浏览器 localStorage -->
+<div class="modal-overlay" id="tokenOverlay">
+  <div class="modal">
+    <div class="modal-title">访问令牌</div>
+    <div class="form-group">
+      <label class="form-label">Access Token</label>
+      <input class="form-input" id="tokenInput" type="password" placeholder="ADMIN_TOKEN / MCP_TOKEN" onkeydown="if(event.key==='Enter')saveTokenInput()">
+      <div class="form-hint" id="tokenHint">该服务已开启鉴权，请输入访问令牌（仅保存在本浏览器 localStorage）</div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="clearSavedToken()">清除本地令牌</button>
+      <button class="btn btn-primary" onclick="saveTokenInput()">保存并重试</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 <div class="msg-popover" id="msgPopover"></div>
 
@@ -326,8 +342,14 @@ const $=id=>document.getElementById(id);
 let S={},providers=[],repos=[],spaces=[{id:'all',name:'全部',builtin:true}],currentSpace='all',selectedSet=new Set(),results=[];
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function toast(msg,type=''){const t=$('toast');t.textContent=msg;t.className='toast show'+(type?' '+type:'');clearTimeout(t._t);t._t=setTimeout(()=>t.className='toast',3000);}
-async function api(p,o={}){const r=await fetch(p,{headers:{'content-type':'application/json'},...o});return r.json();}
-const STATUS={registered:['','Registered'],cloning:['cloning','Cloning'],cloned:['cloned','Cloned'],indexing:['indexing','Indexing'],indexed:['indexed','Indexed'],removing:['removing','Removing'],failed:['failed','Failed']};
+let TOKEN=localStorage.getItem('cgm_token')||'';
+const authHeaders=()=>TOKEN?{'Authorization':'Bearer '+TOKEN}:{};
+async function api(p,o={}){const r=await fetch(p.replace(/^\//,''),{...o,headers:{'content-type':'application/json',...authHeaders(),...(o.headers||{})}});if(r.status===401){promptToken('访问被拒绝（401）：令牌缺失或不正确，请输入服务端配置的 ADMIN_TOKEN / MCP_TOKEN');throw new Error('unauthorized');}return r.json();}
+function promptToken(msg){if(msg)$('tokenHint').textContent=msg;$('tokenOverlay').classList.add('show');setTimeout(()=>$('tokenInput').focus(),0);}
+async function saveTokenInput(){const v=$('tokenInput').value.trim();if(!v){toast('请输入令牌','error');return;}TOKEN=v;localStorage.setItem('cgm_token',v);$('tokenOverlay').classList.remove('show');toast('令牌已保存，重新加载','success');try{await loadSettings();await loadRepos();}catch{}}
+function clearSavedToken(){TOKEN='';localStorage.removeItem('cgm_token');$('tokenInput').value='';toast('已清除本地令牌');}
+window.addEventListener('unhandledrejection',e=>{if(e&&e.reason&&e.reason.message==='unauthorized')e.preventDefault();});
+const STATUS={registered:['','Registered'],cloning:['cloning','Cloning'],cloned:['cloned','Cloned'],indexing:['indexing','Indexing'],indexed:['indexed','Indexed'],removing:['removing','Removing'],failed:['failed','Failed'],pull_failed:['failed','Pull Failed']};
 const PROVIDER_LABELS={gitlab:'GitLab',gitee:'Gitee',github:'GitHub'};
 const PROVIDER_PLACEHOLDERS={gitlab:{url:'https://gitlab.company.com',token:'glpat-xxxx'},gitee:{url:'https://gitee.com',token:'Your Gitee access token'},github:{url:'',token:'ghp_xxxx or github_pat_xxxx'}};
 
@@ -560,30 +582,31 @@ function renderRepos(){
   });
 }
 // 弹窗输入分支名 → 触发后台创建 worktree（异步，返回稍后重试）
-async function doWt(id){const br=prompt('输入要切出的分支名（远程已存在的分支）：');if(!br||!br.trim())return;const r=repos.find(x=>x.id===id);if(r){r.message='Creating branch worktree...';renderRepos();}await fetch('/api/repos/'+id+'/worktree',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({branch:br.trim()})});toast('Branch "'+br.trim()+'" indexing, retry search later','success');loadRepos();}
+async function doWt(id){const br=prompt('输入要切出的分支名（远程已存在的分支）：');if(!br||!br.trim())return;const r=repos.find(x=>x.id===id);if(r){r.message='Creating branch worktree...';renderRepos();}await fetch('api/repos/'+id+'/worktree',{method:'POST',headers:{'content-type':'application/json',...authHeaders()},body:JSON.stringify({branch:br.trim()})});toast('Branch "'+br.trim()+'" indexing, retry search later','success');loadRepos();}
 // 删除单个分支 worktree
-async function doWtRemove(id,branch){if(!confirm('删除分支 "'+branch+'" 的 worktree 索引？'))return;const r=repos.find(x=>x.id===id);if(r){const w=(r.worktrees||[]).find(x=>x.branch===branch);if(w){w.status='removing';w.message='Removing...';renderRepos();}}await fetch('/api/repos/'+id+'/worktree/'+encodeURIComponent(branch),{method:'DELETE'});toast('Branch "'+branch+'" removed','success');loadRepos();}
-async function doOp(id,op){const r=repos.find(x=>x.id===id);if(r){r.status=op==='clone'?'cloning':(op==='analyze'||op==='sync')?'indexing':'registered';r.message='Processing...';renderRepos();renderStats();}fetch('/api/repos/'+id+'/'+op,{method:'POST'});}
+async function doWtRemove(id,branch){if(!confirm('删除分支 "'+branch+'" 的 worktree 索引？'))return;const r=repos.find(x=>x.id===id);if(r){const w=(r.worktrees||[]).find(x=>x.branch===branch);if(w){w.status='removing';w.message='Removing...';renderRepos();}}await fetch('api/repos/'+id+'/worktree/'+encodeURIComponent(branch),{method:'DELETE',headers:authHeaders()});toast('Branch "'+branch+'" removed','success');loadRepos();}
+async function doOp(id,op){const r=repos.find(x=>x.id===id);if(r){r.status=op==='clone'?'cloning':(op==='analyze'||op==='sync')?'indexing':'registered';r.message='Processing...';renderRepos();renderStats();}fetch('api/repos/'+id+'/'+op,{method:'POST',headers:authHeaders()});}
 async function doRemove(id){
   const r=repos.find(x=>x.id===id);if(!r)return;
   const spaceIds=(r.spaceIds||[]);
   // 在当前具体空间下且还绑了其他空间 → 只解除与该空间的关系，不删仓库
   if(currentSpace!=='all' && spaceIds.length>1){
     if(!confirm('仓库「'+r.name+'」还属于其他空间，仅从当前空间移除绑定关系？'))return;
-    await fetch(`/api/spaces/${currentSpace}/repos/${id}`,{method:'DELETE'});
+    await fetch(`api/spaces/${currentSpace}/repos/${id}`,{method:'DELETE',headers:authHeaders()});
     toast('已从当前空间移除绑定','success');loadRepos();return;
   }
   if(!confirm('Remove "'+r.name+'" and delete its directory/index?'))return;
   r.status='removing';r.message='Removing...';renderRepos();renderStats();
-  await fetch('/api/repos/'+id+'/remove',{method:'POST'});
+  await fetch('api/repos/'+id+'/remove',{method:'POST',headers:authHeaders()});
   toast('Removed','success');loadRepos();
 }
 
-loadSettings();loadRepos();
+loadSettings().catch(()=>{});loadRepos().catch(()=>{});
 
 /* 实时刷新：服务端 saveRepos 时经 SSE 广播 repos-changed，收到即拉取；30s 无条件兜底轮询（防 SSE 僵尸连接/断连期间卡死状态） */
 let connLive=false;
-const es=new EventSource('/mcp');
+/* SSE 走 /mcp：有令牌经 ?token= 传递（EventSource 无法带请求头），无令牌保持 /mcp（本地回环默认免鉴权，行为不变） */
+const es=new EventSource(TOKEN?'mcp?token='+encodeURIComponent(TOKEN):'mcp');
 es.addEventListener('repos-changed',()=>loadRepos());
 es.onopen=()=>{connLive=true;};
 es.onerror=()=>{connLive=false;};

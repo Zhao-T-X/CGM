@@ -5,9 +5,14 @@
 //
 // 运行：node server.mjs   （默认 http://127.0.0.1:8801）
 // 环境变量：
-//   HOST / PORT        监听地址端口（默认 127.0.0.1 / 8801）
+//   HOST / PORT        监听地址端口（默认 127.0.0.1 / 8801；HOST 非回环时必须配 token，否则拒绝启动）
 //   DATA_DIR           数据目录（settings.json + repos.json 存放，默认 ./data）
-//   ADMIN_TOKEN        可选：管理界面/API 的 Bearer 令牌（为空则仅限本机访问不作鉴权）
+//   ADMIN_TOKEN        /api/* 的 Bearer 令牌；未设置时首次启动自动生成随机令牌并持久化到 <DATA_DIR>/auth.json
+//   MCP_TOKEN          /mcp* 的令牌（未设置回落 ADMIN_TOKEN，自用只配一个变量即可）
+//   LOCAL_NO_AUTH      回环免鉴权开关（默认 1 开启；设 0 关闭，本地也需令牌）
+//   TRUSTED_PROXIES    逗号分隔可信代理 IP：仅对可信代理采信 X-Forwarded-For 判定回环来源
+//   BASE_PATH          反代前缀部署路径（如 /repair-service-mcp），默认空
+//   MAX_BODY_BYTES     请求体大小上限（默认 1MB，超限返回 413）
 //   CODEGRAPH_BIN      codegraph 可执行（未设置时自动探测：PATH 里的 codegraph → npm 全局包 shim）
 // 数据：
 //   <DATA_DIR>/settings.json   提供商配置列表 + clone 基目录
@@ -27,7 +32,32 @@ const PORT = parseInt(process.env.PORT || '8801', 10);
 const DATA_DIR = process.env.DATA_DIR
   ? path.resolve(process.env.DATA_DIR)
   : path.join(HERE, 'data');
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
+// 令牌引导：显式 ADMIN_TOKEN 环境变量优先；未配置时首次启动生成随机令牌（192bit）并持久化到 <DATA_DIR>/auth.json，重启沿用
+function bootstrapToken() {
+  const file = path.join(DATA_DIR, 'auth.json');
+  let saved = {};
+  try { saved = JSON.parse(fsSync.readFileSync(file, 'utf8')); } catch {}
+  if (process.env.ADMIN_TOKEN) return { token: process.env.ADMIN_TOKEN, file, generated: false };
+  if (typeof saved.adminToken === 'string' && saved.adminToken) return { token: saved.adminToken, file, generated: false };
+  const token = crypto.randomBytes(24).toString('base64url');
+  try {
+    fsSync.mkdirSync(DATA_DIR, { recursive: true });
+    fsSync.writeFileSync(file, JSON.stringify({ adminToken: token, createdAt: new Date().toISOString() }, null, 2));
+    return { token, file, generated: true };
+  } catch (e) {
+    log('warn: auth.json 写入失败，未能生成默认令牌', e.message);
+    return { token: '', file, generated: false };
+  }
+}
+const BOOTSTRAP_TOKEN = bootstrapToken();
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || BOOTSTRAP_TOKEN.token;
+const MCP_TOKEN = process.env.MCP_TOKEN || ADMIN_TOKEN; // 未设置回落 ADMIN_TOKEN（自用只配一个变量）
+const LOCAL_NO_AUTH = process.env.LOCAL_NO_AUTH !== '0'; // 回环免鉴权默认开启（设 0 关闭，本地也强制鉴权）
+const TRUSTED_PROXIES = new Set((process.env.TRUSTED_PROXIES || '').split(',').map(s => s.trim()).filter(Boolean));
+// BASE_PATH 前缀部署：反代把 /<base>/* 转发进来，路由匹配前剥掉该前缀；未设置行为不变
+export const BASE_PATH = process.env.BASE_PATH ? '/' + process.env.BASE_PATH.replace(/^\/+|\/+$/g, '') : '';
+// 请求体上限（readBody 与 MCP 消息体共用同一上限，超限 413）
+export const MAX_BODY_BYTES = Math.max(1, parseInt(process.env.MAX_BODY_BYTES || String(1024 * 1024), 10) || 1024 * 1024);
 
 // CODEGRAPH_BIN 解析：显式配置原样保留（含 JSON 数组形式）；未设置时自动探测——
 // 1) PATH 里的 codegraph（Linux install.sh 方式）；2) npm 全局包 @colbymchenry/codegraph 的
@@ -338,15 +368,76 @@ function getCloneAuthUrl(gitUrl, provider) {
 function sendJson(res, code, obj) { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); }
 function readBody(req) {
   return new Promise((resolve, reject) => {
-    const cs = []; req.on('data', (c) => cs.push(c));
-    req.on('end', () => { try { const t = Buffer.concat(cs).toString('utf8'); resolve(t ? JSON.parse(t) : {}); } catch (e) { reject(e); } });
+    const cs = []; let size = 0, over = false;
+    req.on('data', (c) => {
+      if (over) return;
+      size += c.length;
+      if (size > MAX_BODY_BYTES) { // 超限：拒收并断开（413 由统一 catch 返回）
+        over = true; cs.length = 0; req.pause();
+        const e = new Error('payload too large'); e.statusCode = 413; reject(e);
+        return;
+      }
+      cs.push(c);
+    });
+    req.on('end', () => { if (over) return; try { const t = Buffer.concat(cs).toString('utf8'); resolve(t ? JSON.parse(t) : {}); } catch (e) { reject(e); } });
     req.on('error', reject);
   });
 }
-function auth(req) {
-  if (!ADMIN_TOKEN) return true;
-  const a = req.headers['authorization'] || '';
-  return a === 'Bearer ' + ADMIN_TOKEN || a === ADMIN_TOKEN;
+
+/* ---------------- 鉴权 ---------------- */
+// 令牌比较：长度不等直接否；等长用 timingSafeEqual（防时序侧信道），绝不用 === 比字符串
+function tokenEquals(a, b) {
+  if (!a || !b) return false;
+  const ba = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  if (ba.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
+}
+// 令牌解析顺序：Authorization: Bearer X → 原始 Authorization（兼容现有写法）→ ?token=（仅 MCP，给只能填 URL 的客户端）→ Cookie cgm_token
+function extractToken(req, query, allowQuery) {
+  const h = req.headers['authorization'];
+  if (h) {
+    const m = /^Bearer\s+(.+)$/i.exec(h.trim());
+    if (m) return m[1].trim();
+    return h.trim();
+  }
+  if (allowQuery && query.token) return String(query.token);
+  const ck = req.headers['cookie'];
+  if (ck) {
+    const m = /(?:^|;\s*)cgm_token=([^;]*)/.exec(ck);
+    if (m) { try { return decodeURIComponent(m[1]); } catch { return m[1]; } }
+  }
+  return '';
+}
+const LOOPBACK_ADDRS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+// 真实来源：仅当对端在可信代理名单内才采信 X-Forwarded-For 最左值（否则一律忽略该头，防伪造）
+function clientAddr(req) {
+  const peer = req.socket.remoteAddress || '';
+  if (TRUSTED_PROXIES.size && TRUSTED_PROXIES.has(peer)) {
+    const xff = req.headers['x-forwarded-for'];
+    if (typeof xff === 'string' && xff.trim()) return xff.split(',')[0].trim();
+  }
+  return peer;
+}
+// Origin 与请求 Host 是否同源（含端口）；无 Origin（curl/MCP 客户端/同源 GET 导航）视为同源
+function originMatchesHost(req) {
+  const origin = req.headers['origin'];
+  if (!origin) return true;
+  try { return new URL(origin).host.toLowerCase() === String(req.headers['host'] || '').toLowerCase(); } catch { return false; }
+}
+// 回环豁免：本机直连 且 无跨源 Origin（浏览器里任意网页都能 POST 127.0.0.1，必须靠 Origin 校验拦住）
+function isLocalNoAuth(req) {
+  return LOCAL_NO_AUTH && LOOPBACK_ADDRS.has(clientAddr(req)) && originMatchesHost(req);
+}
+// /api/* 守卫：回环豁免 → ADMIN_TOKEN
+function guardAdmin(req) {
+  if (isLocalNoAuth(req)) return true;
+  return tokenEquals(extractToken(req, {}, false), ADMIN_TOKEN);
+}
+// /mcp* 守卫：回环豁免 → MCP_TOKEN（未设置回落 ADMIN_TOKEN；?token= 兜底）
+function guardMcp(req, query) {
+  if (isLocalNoAuth(req)) return true;
+  return tokenEquals(extractToken(req, query, true), MCP_TOKEN);
 }
 async function staticServe(req, res, pathname) {
   if (pathname === '/' || pathname === '/index.html') {
@@ -397,10 +488,21 @@ async function opSync(repo) {
   if (!repo.localPath || !fsSync.existsSync(repo.localPath)) { repo.status = 'failed'; repo.message = 'not cloned'; await saveRepos(); return false; }
   repo.status = 'indexing'; repo.message = 'Pulling & syncing...'; await saveRepos();
   const pull = await run('git', ['-C', repo.localPath, 'pull']); // 拉取远端变更（浅克隆下 fetch 保持 shallow 边界）
+  if (!pull.ok) {
+    // pull 失败 → 不执行索引（否则界面显示正常但索引是旧的）：标记拉取失败，status 不得置 indexed
+    repo.status = 'pull_failed';
+    repo.message = ('pull failed: ' + (pull.err || pull.out || '')).slice(-400);
+    await saveRepos();
+    return false;
+  }
   const [cmd, ...args] = parseBin(CODEGRAPH_BIN);
   const sc = await enqueue(() => run(cmd, [...args, 'sync', repo.localPath], { cwd: settings.cloneBaseDir })); // 增量重建索引（入队限流）
   repo.status = sc.ok ? 'indexed' : 'failed';
-  repo.message = (sc.out || sc.err || pull.err || pull.out || '').slice(-400);
+  repo.message = (sc.out || sc.err || pull.out || '').slice(-400);
+  if (sc.ok) { // 记录同步/索引的 HEAD，便于判断索引新鲜度
+    const rev = await run('git', ['-C', repo.localPath, 'rev-parse', 'HEAD']);
+    if (rev.ok) repo.lastSyncedCommit = repo.lastIndexedCommit = rev.out.trim();
+  }
   await saveRepos();
   return sc.ok;
 }
@@ -501,7 +603,7 @@ export { opEnsureWorktree };
 
 /* ---------------- 索引新鲜度自动刷新（SYNC_HOURS） ---------------- */
 async function autoSync() {
-  const targets = repos.filter((r) => r.status === 'indexed' && r.localPath);
+  const targets = repos.filter((r) => (r.status === 'indexed' || r.status === 'pull_failed') && r.localPath);
   if (!targets.length) return;
   log(`auto-sync: ${targets.length} 个已索引仓库 git pull + codegraph sync`);
   // 并发 pull（网络型）+ 经队列限流 sync（CPU/IO 型），整体一轮耗时 ~ targets/QUEUE_CONCURRENCY
@@ -531,31 +633,52 @@ function scheduleSync() {
 }
 scheduleSync();
 
+/* ---------------- 设置出参脱敏 ---------------- */
+const TOKEN_MASK = '••••';
+// token 出参一律脱敏（掩码+末4位），绝不返回明文；PUT 回传掩码值会被忽略、不覆盖真实 token
+function maskToken(t) { return t ? TOKEN_MASK + String(t).slice(-4) : ''; }
+function toSettingsDto(s) { return { ...s, providers: (s.providers || []).map(p => ({ ...p, token: maskToken(p.token) })) }; }
+
 /* ---------------- 路由 ---------------- */
 const server = http.createServer(async (req, res) => {
   try {
-    const pathname = req.url.split('?')[0];
+    let pathname = req.url.split('?')[0];
     const query = Object.fromEntries(new URLSearchParams(req.url.split('?')[1] || ''));
+    // BASE_PATH 前缀部署：剥掉前缀后按原路由匹配；前缀外一律 404（未设置时行为不变）
+    if (BASE_PATH) {
+      if (pathname === BASE_PATH) { res.writeHead(301, { Location: BASE_PATH + '/' }); res.end(); return; }
+      if (!pathname.startsWith(BASE_PATH + '/')) return sendJson(res, 404, { error: 'not_found' });
+      pathname = pathname.slice(BASE_PATH.length);
+    }
+    // CORS 预检最先放行（不做鉴权；Allow-Headers 必须含 MCP-Protocol-Version，否则浏览器直连失败）
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID',
+        'Access-Control-Max-Age': '86400'
+      });
+      res.end();
+      return;
+    }
+    // 跨源请求（Origin 与 Host 不符）一律拒绝且不回 CORS 头——防任意网页驱使浏览器打本地服务
+    if (!originMatchesHost(req)) {
+      log('warn: blocked cross-origin request', req.headers['origin'], req.url);
+      return sendJson(res, 401, { error: 'cross_origin_forbidden' });
+    }
     // 健康检查（无鉴权，供 systemd/探针/监控）
     if (pathname === '/healthz') return sendJson(res, 200, { ok: true, repos: repos.length, uptime: Math.round(process.uptime()) });
-    if (!pathname.startsWith('/api/')) {
-      // MCP 端点
-      if (pathname === '/mcp') {
-        if (req.method === 'GET') {
-          return handleSseConnection(req, res);
-        }
-        return await handleMcpMessage(req, res, repos);
-      }
-      // MCP 消息端点
-      if (pathname === '/mcp/message') {
-        return await handleMcpMessage(req, res, repos);
-      }
-      return staticServe(req, res, pathname);
+    // MCP 端点（GET /mcp 走 SSE、POST 走消息；/mcp/message 走消息）—— 路由级守卫
+    if (pathname === '/mcp' || pathname === '/mcp/message') {
+      if (!guardMcp(req, query)) return sendJson(res, 401, { error: 'unauthorized' });
+      if (pathname === '/mcp' && req.method === 'GET') return handleSseConnection(req, res);
+      return await handleMcpMessage(req, res, repos);
     }
-    if (!auth(req)) return sendJson(res, 401, { error: 'unauthorized' });
+    if (!pathname.startsWith('/api/')) return staticServe(req, res, pathname); // 页面本身公开（否则前端拿不到令牌表单）
+    if (!guardAdmin(req)) return sendJson(res, 401, { error: 'unauthorized' });
 
     // 设置（全局）
-    if (pathname === '/api/settings' && req.method === 'GET') return sendJson(res, 200, settings);
+    if (pathname === '/api/settings' && req.method === 'GET') return sendJson(res, 200, toSettingsDto(settings));
     if (pathname === '/api/settings' && req.method === 'PUT') {
       const b = await readBody(req);
       // 只更新全局字段，providers 通过专用端点管理
@@ -565,7 +688,7 @@ const server = http.createServer(async (req, res) => {
         settings.autoSyncHours = (b.autoSyncHours === null || b.autoSyncHours === '') ? null : Number(b.autoSyncHours);
         scheduleSync(); // 频率变更立即重建定时器
       }
-      await saveSettings(); return sendJson(res, 200, settings);
+      await saveSettings(); return sendJson(res, 200, toSettingsDto(settings));
     }
 
     // 空间（标签/分组）CRUD
@@ -654,7 +777,8 @@ const server = http.createServer(async (req, res) => {
       const b = await readBody(req);
       if (b.name !== undefined) provider.name = b.name;
       if (b.url !== undefined) provider.url = b.url;
-      if (b.token !== undefined) provider.token = b.token;
+      // 回传脱敏掩码值 → 忽略，不得覆盖真实 token
+      if (b.token !== undefined && !String(b.token).startsWith(TOKEN_MASK)) provider.token = b.token;
       await saveSettings();
       return sendJson(res, 200, { ...provider, token: provider.token ? '***' : '' });
     }
@@ -844,16 +968,27 @@ const server = http.createServer(async (req, res) => {
 
     sendJson(res, 404, { error: 'not_found' });
   } catch (e) {
+    if (e.statusCode === 413) { log('request body too large'); if (!res.headersSent) sendJson(res, 413, { error: 'payload_too_large' }); return; }
     log('req error', e);
     if (!res.headersSent) sendJson(res, 500, { error: String(e) });
   }
 });
 
 await loadAll();
+// fail closed 兜底：令牌引导失败（auth.json 不可写等）导致完全无令牌且对外监听 → 拒绝启动
+const LOOPBACK_HOSTS = ['127.0.0.1', 'localhost', '::1'];
+if (!LOOPBACK_HOSTS.includes(HOST) && !ADMIN_TOKEN && !MCP_TOKEN) {
+  console.error(`[cgm] 拒绝启动：HOST=${HOST} 是对外监听，必须配置 ADMIN_TOKEN 或 MCP_TOKEN（否则局域网内任何人可操作仓库与代码）。本地开发请保持 HOST=127.0.0.1。`);
+  process.exit(1);
+}
 server.listen(PORT, HOST, () => {
   log(`CodeGraph Manager on http://${HOST}:${PORT}`);
   log(`data dir: ${DATA_DIR}`);
   log(`codegraph bin: ${CODEGRAPH_BIN}`);
-  log(`auth: ${ADMIN_TOKEN ? 'Bearer token' : 'localhost only'}`);
+  if (BOOTSTRAP_TOKEN.generated) {
+    log(`首次启动已生成默认访问令牌（已持久化到 ${BOOTSTRAP_TOKEN.file}）：${ADMIN_TOKEN}`);
+    log('远程/局域网访问请携带该令牌：Authorization: Bearer <token>，或在界面令牌框输入；本机回环访问默认免鉴权');
+  }
+  log(`auth: admin_token=${ADMIN_TOKEN ? (BOOTSTRAP_TOKEN.generated ? 'on(自动生成,见 auth.json)' : 'on') : 'off'}, mcp_token=${process.env.MCP_TOKEN ? 'on' : 'off(回落 ADMIN_TOKEN)'}, local_no_auth=${LOCAL_NO_AUTH ? 'on(回环免鉴权)' : 'off(本地也需令牌)'}, base_path=${BASE_PATH || '(none)'}, max_body=${MAX_BODY_BYTES}B`);
   log(`providers: ${settings.providers.length} configured`);
 });
