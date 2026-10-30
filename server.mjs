@@ -51,6 +51,8 @@ function resolveCodegraphBin() {
   return 'codegraph';
 }
 const CODEGRAPH_BIN = resolveCodegraphBin();
+// 回写 env：mcp.mjs 的 stdio 网关子进程读取 CODEGRAPH_BIN，必须拿到探测结果而非裸命令名
+process.env.CODEGRAPH_BIN = CODEGRAPH_BIN;
 
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const REPOS_FILE = path.join(DATA_DIR, 'repos.json');

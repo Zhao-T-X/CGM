@@ -249,6 +249,13 @@ function getCgProc() {
       msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result);
     }
   });
+  child.on('error', (e) => {
+    // spawn 失败（如 ENOENT）：不监听会以 unhandled 'error' 崩掉整个服务进程
+    cg.closed = true;
+    console.error('[codegraph-gateway] 子进程启动失败:', e.message, '（下次调用自动重试）');
+    for (const { reject, timer } of cg.pending.values()) { clearTimeout(timer); reject(new Error(`codegraph 启动失败: ${e.message}`)); }
+    cg.pending.clear();
+  });
   child.on('exit', () => {
     cg.closed = true;
     for (const { reject, timer } of cg.pending.values()) { clearTimeout(timer); reject(new Error('codegraph 子进程已退出')); }
