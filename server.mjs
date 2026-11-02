@@ -198,12 +198,31 @@ async function saveSettings() {
     ...settings,
     providers: settings.providers.map(p => ({ ...p, token: p.token ? encryptToken(p.token) : '' }))
   };
-  await fs.writeFile(SETTINGS_FILE, JSON.stringify(snapshot, null, 2));
+  await writeJsonAtomic(SETTINGS_FILE, snapshot);
 }
 async function saveRepos() {
   await ensureDataDir();
-  await fs.writeFile(REPOS_FILE, JSON.stringify(repos, null, 2));
+  await writeJsonAtomic(REPOS_FILE, repos);
   broadcastSse('repos-changed', { t: Date.now() }); // 推送前端刷新（替代 4s 轮询）
+}
+// JSON 落盘原子化：先写临时文件再 rename 原子替换（防并发写交错产生损坏 JSON，损坏会被 loadAll 静默当空）。
+// 同一文件的并发写经尾随链串行化；rename 在 Windows 上遇目标被占用（杀毒/备份）会 EPERM/EBUSY，退避重试，仍失败明确报错不静默。
+const writeQueues = new Map(); // file -> 上一次写盘 Promise（尾随链）
+function writeJsonAtomic(file, data) {
+  const task = (writeQueues.get(file) || Promise.resolve()).catch(() => {}).then(() => doWriteJson(file, data));
+  writeQueues.set(file, task.catch(() => {})); // 单次失败不断链
+  return task;
+}
+async function doWriteJson(file, data) {
+  const tmp = file + '.tmp';
+  await fs.writeFile(tmp, JSON.stringify(data, null, 2));
+  for (let i = 0; ; i++) {
+    try { await fs.rename(tmp, file); return; }
+    catch (e) {
+      if (i >= 4) { log(`warn: 持久化失败 ${file}: ${e.message}`); throw e; }
+      await new Promise(r => setTimeout(r, 50 * (i + 1)));
+    }
+  }
 }
 const RUNNING_STATUSES = ['cloning', 'indexing', 'removing', 'syncing'];
 // 启动自愈：进程被重启中断时，把卡在"运行中状态"的仓库重置为可重试，防永久处理中
@@ -215,6 +234,10 @@ async function healStaleStatus() {
       r.status = r.status === 'cloning' ? 'registered' : (r.localPath ? 'cloned' : 'registered');
       r.message = 'Interrupted by restart — reset.';
       changed = true;
+    }
+    // 分支 worktree 同理：重启打断的 indexing 永远不会自己结束，重置为 failed（可重新触发创建）
+    for (const w of (r.worktrees || [])) {
+      if (w.status === 'indexing') { w.status = 'failed'; w.message = 'Interrupted by restart — retry.'; changed = true; }
     }
   }
   if (changed) await saveRepos();
@@ -258,6 +281,20 @@ function pumpQueue() {
     queueActive++;
     Promise.resolve().then(fn).then(resolve, reject).finally(() => { queueActive--; pumpQueue(); });
   }
+}
+
+/* ---------------- 单仓生命周期互斥 ---------------- */
+// 同一 repo 的 clone/analyze/sync/remove/worktree 串行执行，防并发 git 操作互踩（如双击 Clone、analyze 与 remove 交叉）。
+// 死锁规避：锁在任务真正开始执行时才获取（尾随链），而非入队时；持锁后等待全局索引队列槽是安全的——
+// 全局队列里的任务（codegraph init/sync）从不反向获取仓锁，不存在循环等待。
+const repoLocks = new Map(); // repoId -> 尾随 Promise
+function withRepoLock(repoId, fn) {
+  const prev = repoLocks.get(repoId) || Promise.resolve();
+  const task = prev.catch(() => {}).then(fn); // 前一任务成败都不阻塞后续
+  const tail = task.catch(() => {});
+  repoLocks.set(repoId, tail);
+  tail.then(() => { if (repoLocks.get(repoId) === tail) repoLocks.delete(repoId); }); // 空闲即清理，防 Map 无限增长
+  return task;
 }
 
 /* ---------------- 提供商抽象层 ---------------- */
@@ -484,21 +521,25 @@ async function opAnalyze(repo) {
     return r.ok;
   });
 }
+// git pull：opSync 与 autoSync 共用。pull 失败 → 统一置 pull_failed、绝不继续索引（防"界面正常但索引是旧的"）
+// status 不得置 indexed；autoSync 目标含 pull_failed，下一轮自动重试
+async function pullRepo(repo) {
+  const pull = await run('git', ['-C', repo.localPath, 'pull']); // 浅克隆下 fetch 保持 shallow 边界
+  if (pull.ok) return true;
+  repo.status = 'pull_failed';
+  repo.message = ('pull failed: ' + (pull.err || pull.out || '')).slice(-400);
+  await saveRepos();
+  log(`sync pull fail ${repo.name}: ${(pull.err || pull.out || '').slice(-150)}`);
+  return false;
+}
 async function opSync(repo) {
   if (!repo.localPath || !fsSync.existsSync(repo.localPath)) { repo.status = 'failed'; repo.message = 'not cloned'; await saveRepos(); return false; }
   repo.status = 'indexing'; repo.message = 'Pulling & syncing...'; await saveRepos();
-  const pull = await run('git', ['-C', repo.localPath, 'pull']); // 拉取远端变更（浅克隆下 fetch 保持 shallow 边界）
-  if (!pull.ok) {
-    // pull 失败 → 不执行索引（否则界面显示正常但索引是旧的）：标记拉取失败，status 不得置 indexed
-    repo.status = 'pull_failed';
-    repo.message = ('pull failed: ' + (pull.err || pull.out || '')).slice(-400);
-    await saveRepos();
-    return false;
-  }
+  if (!await pullRepo(repo)) return false;
   const [cmd, ...args] = parseBin(CODEGRAPH_BIN);
   const sc = await enqueue(() => run(cmd, [...args, 'sync', repo.localPath], { cwd: settings.cloneBaseDir })); // 增量重建索引（入队限流）
   repo.status = sc.ok ? 'indexed' : 'failed';
-  repo.message = (sc.out || sc.err || pull.out || '').slice(-400);
+  repo.message = (sc.out || sc.err || '').slice(-400);
   if (sc.ok) { // 记录同步/索引的 HEAD，便于判断索引新鲜度
     const rev = await run('git', ['-C', repo.localPath, 'rev-parse', 'HEAD']);
     if (rev.ok) repo.lastSyncedCommit = repo.lastIndexedCommit = rev.out.trim();
@@ -558,7 +599,8 @@ async function opEnsureWorktree(repo, branch) {
   const wt = existing || { branch, localPath: path.join(repo.localPath, 'worktrees', sanitize(branch)), status: 'registered', message: '' };
   if (!existing) { repo.worktrees = repo.worktrees || []; repo.worktrees.push(wt); }
   wt.status = 'indexing'; wt.message = 'Creating worktree & indexing...'; await saveRepos();
-  (async () => {
+  // 构建全程持仓锁：fetch/worktree add/codegraph init 不与该仓其他操作交叉
+  withRepoLock(repo.id, async () => {
     try {
       // 主仓库 .gitignore 追加 worktrees/（豁免分支 worktree 被主索引扫入；兼容已存在的老仓库）
       const gi = path.join(repo.localPath, '.gitignore');
@@ -596,7 +638,7 @@ async function opEnsureWorktree(repo, branch) {
     }
     await saveRepos();
     log(`worktree ${repo.name}@${branch} -> ${wt.status}`);
-  })();
+  }).catch(() => {});
   return { ready: false, pending: true };
 }
 export { opEnsureWorktree };
@@ -606,16 +648,15 @@ async function autoSync() {
   const targets = repos.filter((r) => (r.status === 'indexed' || r.status === 'pull_failed') && r.localPath);
   if (!targets.length) return;
   log(`auto-sync: ${targets.length} 个已索引仓库 git pull + codegraph sync`);
-  // 并发 pull（网络型）+ 经队列限流 sync（CPU/IO 型），整体一轮耗时 ~ targets/QUEUE_CONCURRENCY
-  await Promise.all(targets.map(async (repo) => {
+  // 并发 pull（网络型）+ 经队列限流 sync（CPU/IO 型）；每仓持锁串行，避免与手动操作交叉
+  await Promise.all(targets.map((repo) => withRepoLock(repo.id, async () => {
     try {
-      const pull = await run('git', ['-C', repo.localPath, 'pull']);
-      if (!pull.ok) log(`sync pull fail ${repo.name}: ${(pull.err || '').slice(-150)}`);
+      if (!await pullRepo(repo)) return; // pull 失败不索引，下轮重试
       const [cmd, ...args] = parseBin(CODEGRAPH_BIN);
       const sc = await enqueue(() => run(cmd, [...args, 'sync', repo.localPath], { cwd: settings.cloneBaseDir }));
       log(`sync ${repo.name} -> ${sc.ok ? 'ok' : 'fail ' + (sc.err || '').slice(-150)}`);
     } catch (e) { log(`sync error ${repo.name}: ${e.message}`); }
-  }));
+  })));
 }
 // 有效同步频率：settings.autoSyncHours（配置页可调）> env SYNC_HOURS > 默认6；0=关闭
 function getSyncHours() {
@@ -864,14 +905,16 @@ const server = http.createServer(async (req, res) => {
         if (!branch) return sendJson(res, 400, { error: 'missing branch' });
         const wt = (repo.worktrees || []).find((w) => w.branch === branch);
         if (!wt) return sendJson(res, 404, { error: 'no_such_worktree' });
-        // 解锁 worktree（解 SQLite db 锁）→ 删目录 → 从列表移除
-        if (wt.localPath && fsSync.existsSync(wt.localPath)) {
-          await run('git', ['worktree', 'remove', '--force', wt.localPath], { cwd: repo.localPath }).catch(()=>{});
-          await fs.rm(wt.localPath, { recursive: true, force: true }).catch(()=>{});
-          await fs.rm(path.join(repo.localPath, '.git', 'worktrees', sanitize(branch)), { recursive: true, force: true }).catch(()=>{});
-        }
-        repo.worktrees = (repo.worktrees || []).filter((w) => w.branch !== branch);
-        await saveRepos();
+        // 持仓锁：解锁（SQLite db 锁）→ 删目录 → 移出列表，避免与构建/其他操作交叉
+        await withRepoLock(repo.id, async () => {
+          if (wt.localPath && fsSync.existsSync(wt.localPath)) {
+            await run('git', ['worktree', 'remove', '--force', wt.localPath], { cwd: repo.localPath }).catch(()=>{});
+            await fs.rm(wt.localPath, { recursive: true, force: true }).catch(()=>{});
+            await fs.rm(path.join(repo.localPath, '.git', 'worktrees', sanitize(branch)), { recursive: true, force: true }).catch(()=>{});
+          }
+          repo.worktrees = (repo.worktrees || []).filter((w) => w.branch !== branch);
+          await saveRepos();
+        });
         return sendJson(res, 200, { ok: true, branch });
       }
     }
@@ -954,15 +997,18 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.write(JSON.stringify({ ok: true, msg: 'started' }));
       res.end();
-      try {
-        let ok = false;
-        if (action === 'clone') ok = await opClone(repo);
-        else if (action === 'analyze') ok = await opAnalyze(repo);
-        else if (action === 'status') ok = await opStatus(repo);
-        else if (action === 'sync') ok = await opSync(repo);
-        else if (action === 'remove') { await opRemove(repo); return; }
-        log(`repo ${repo.name} ${action} -> ${ok ? 'ok' : 'fail'}`);
-      } catch (e) { log('op error', e); }
+      // 同仓操作互斥：并发请求（双击/analyze+remove 同发）在仓锁上排队串行，不交叉执行
+      withRepoLock(repo.id, async () => {
+        try {
+          let ok = false;
+          if (action === 'clone') ok = await opClone(repo);
+          else if (action === 'analyze') ok = await opAnalyze(repo);
+          else if (action === 'status') ok = await opStatus(repo);
+          else if (action === 'sync') ok = await opSync(repo);
+          else if (action === 'remove') { await opRemove(repo); return; }
+          log(`repo ${repo.name} ${action} -> ${ok ? 'ok' : 'fail'}`);
+        } catch (e) { log('op error', e); }
+      });
       return;
     }
 
