@@ -6,7 +6,7 @@
 // 运行：node server.mjs   （默认 http://127.0.0.1:8801）
 // 环境变量：
 //   HOST / PORT        监听地址端口（默认 127.0.0.1 / 8801；HOST 非回环时必须配 token，否则拒绝启动）
-//   DATA_DIR           数据目录（settings.json + repos.json 存放，默认 ./data）
+//   DATA_DIR           数据目录（cgm.db(SQLite) 存放，默认 ./data）
 //   ADMIN_TOKEN        /api/* 的 Bearer 令牌；未设置时首次启动自动生成随机令牌并持久化到 <DATA_DIR>/auth.json
 //   MCP_TOKEN          /mcp* 的令牌（未设置回落 ADMIN_TOKEN，自用只配一个变量即可）
 //   LOCAL_NO_AUTH      回环免鉴权开关（默认 1 开启；设 0 关闭，本地也需令牌）
@@ -15,14 +15,16 @@
 //   MAX_BODY_BYTES     请求体大小上限（默认 1MB，超限返回 413）
 //   CODEGRAPH_BIN      codegraph 可执行（未设置时自动探测：PATH 里的 codegraph → npm 全局包 shim）
 // 数据：
-//   <DATA_DIR>/settings.json   提供商配置列表 + clone 基目录
-//   <DATA_DIR>/repos.json      仓库注册表（clone 路径、分析状态）
+//   <DATA_DIR>/cgm.db          SQLite（node:sqlite）：repos 表一仓一行 + kv 表存 settings 快照；
+//                              旧 settings.json/repos.json 首启自动迁移，改名 *.json.migrated-* 保留
+//   <DATA_DIR>/auth.json       首启自动生成的默认令牌（bootstrap，保持文件形式）
 import http from 'node:http';
 import { spawn, spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import { handleMcpMessage, handleSseConnection, broadcastSse } from './mcp.mjs';
 
@@ -92,8 +94,41 @@ const CLONE_BASE_DIR_DEFAULT = path.join(DATA_DIR, 'repos');
 /* ---------------- 日志 ---------------- */
 function log(...a) { console.log(`[${new Date().toISOString()}]`, ...a); }
 
-/* ---------------- 持久化 ---------------- */
-async function ensureDataDir() { await fs.mkdir(DATA_DIR, { recursive: true }); }
+/* ---------------- 持久化（SQLite，node:sqlite 文档模型） ---------------- */
+// repos 一仓一行（JSON 载荷），settings 整快照一行（kv 表）。node:sqlite 同步 API + 事务天然原子，
+// 替代旧 tmp+rename 方案；旧 settings.json/repos.json 首启自动迁移，迁移后改名 *.json.migrated-* 保底不删。
+const DB_FILE = path.join(DATA_DIR, 'cgm.db');
+let db = null;
+function openDb() {
+  fsSync.mkdirSync(DATA_DIR, { recursive: true });
+  db = new DatabaseSync(DB_FILE);
+  db.exec('PRAGMA journal_mode=WAL');
+  db.exec(`CREATE TABLE IF NOT EXISTS repos (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+           CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, data TEXT NOT NULL);`);
+  migrateJsonToSqlite();
+}
+function migrateJsonToSqlite() {
+  const stamp = '.migrated-' + new Date().toISOString().replace(/[:.]/g, '-');
+  if (db.prepare('SELECT COUNT(*) AS n FROM repos').get().n === 0) {
+    try {
+      const list = JSON.parse(fsSync.readFileSync(REPOS_FILE, 'utf8'));
+      const ins = db.prepare('INSERT OR REPLACE INTO repos (id, data) VALUES (?, ?)');
+      db.exec('BEGIN');
+      for (const r of list) if (r && r.id) ins.run(String(r.id), JSON.stringify(r));
+      db.exec('COMMIT');
+      try { fsSync.renameSync(REPOS_FILE, REPOS_FILE + stamp); } catch {}
+      log(`已迁移 repos.json → SQLite（${list.length} 条），原文件改名保留`);
+    } catch { /* 无旧文件/解析失败 = 无需迁移 */ }
+  }
+  if (db.prepare("SELECT COUNT(*) AS n FROM kv WHERE k='settings'").get().n === 0) {
+    try {
+      const saved = JSON.parse(fsSync.readFileSync(SETTINGS_FILE, 'utf8'));
+      db.prepare("INSERT OR REPLACE INTO kv (k, data) VALUES ('settings', ?)").run(JSON.stringify(saved));
+      try { fsSync.renameSync(SETTINGS_FILE, SETTINGS_FILE + stamp); } catch {}
+      log('已迁移 settings.json → SQLite，原文件改名保留');
+    } catch { /* 同上 */ }
+  }
+}
 
 /* ---------------- 凭证加密（AES-256-GCM） ---------------- */
 // 约定：内存中 provider.token 保持明文（供 API/克隆调用），落盘时加密。
@@ -110,7 +145,7 @@ function getEncKey() {
   } catch {}
   const key = crypto.randomBytes(32);
   encKey = key;
-  try { ensureDataDir(); fsSync.writeFileSync(keyFile, key.toString('hex'), { flag: 'wx' }); } catch {}
+  try { fsSync.mkdirSync(DATA_DIR, { recursive: true }); fsSync.writeFileSync(keyFile, key.toString('hex'), { flag: 'wx' }); } catch {}
   return encKey;
 }
 function encryptToken(t) {
@@ -148,32 +183,35 @@ function ensureWorktreesField() { for (const r of repos) if (!Array.isArray(r.wo
 function ensureSpaceIdsField() { for (const r of repos) if (!Array.isArray(r.spaceIds)) r.spaceIds = []; }
 
 async function loadAll() {
-  await ensureDataDir();
+  openDb(); // 打开 SQLite（含旧 JSON 自动迁移）
   try {
-    const saved = JSON.parse(await fs.readFile(SETTINGS_FILE, 'utf8'));
-    // 兼容旧格式：迁移旧的单一提供商配置到新格式
-    if (saved.gitlabUrl || saved.gitlabToken || saved.giteeUrl || saved.giteeToken || saved.githubToken) {
-      const providers = [];
-      if (saved.gitlabUrl || saved.gitlabToken) {
-        providers.push({ id: crypto.randomUUID(), type: 'gitlab', name: 'GitLab', url: saved.gitlabUrl || '', token: saved.gitlabToken || '', createdAt: Date.now() });
+    const row = db.prepare("SELECT data FROM kv WHERE k='settings'").get();
+    if (row) {
+      const saved = JSON.parse(row.data);
+      // 兼容旧格式：迁移旧的单一提供商配置到新格式
+      if (saved.gitlabUrl || saved.gitlabToken || saved.giteeUrl || saved.giteeToken || saved.githubToken) {
+        const providers = [];
+        if (saved.gitlabUrl || saved.gitlabToken) {
+          providers.push({ id: crypto.randomUUID(), type: 'gitlab', name: 'GitLab', url: saved.gitlabUrl || '', token: saved.gitlabToken || '', createdAt: Date.now() });
+        }
+        if (saved.giteeUrl || saved.giteeToken) {
+          providers.push({ id: crypto.randomUUID(), type: 'gitee', name: 'Gitee', url: saved.giteeUrl || 'https://gitee.com', token: saved.giteeToken || '', createdAt: Date.now() });
+        }
+        if (saved.githubToken) {
+          providers.push({ id: crypto.randomUUID(), type: 'github', name: 'GitHub', url: '', token: saved.githubToken, createdAt: Date.now() });
+        }
+        settings = {
+          providers,
+          activeProviderId: providers[0]?.id || '',
+          cloneBaseDir: saved.cloneBaseDir || ''
+        };
+      } else {
+        settings = { ...settings, ...saved };
       }
-      if (saved.giteeUrl || saved.giteeToken) {
-        providers.push({ id: crypto.randomUUID(), type: 'gitee', name: 'Gitee', url: saved.giteeUrl || 'https://gitee.com', token: saved.giteeToken || '', createdAt: Date.now() });
-      }
-      if (saved.githubToken) {
-        providers.push({ id: crypto.randomUUID(), type: 'github', name: 'GitHub', url: '', token: saved.githubToken, createdAt: Date.now() });
-      }
-      settings = {
-        providers,
-        activeProviderId: providers[0]?.id || '',
-        cloneBaseDir: saved.cloneBaseDir || ''
-      };
-    } else {
-      settings = { ...settings, ...saved };
     }
   } catch {}
   if (!settings.cloneBaseDir) settings.cloneBaseDir = CLONE_BASE_DIR_DEFAULT; // 兼容旧数据/空值：兜底回 DATA_DIR/repos
-  try { repos = JSON.parse(await fs.readFile(REPOS_FILE, 'utf8')); } catch {}
+  try { repos = db.prepare('SELECT data FROM repos').all().map((r) => JSON.parse(r.data)); } catch {}
   await healStaleStatus(); // 启动自愈：重置被重启中断的运行中状态
   ensureWorktreesField();  // 兼容旧数据：确保 worktrees 字段存在
   ensureSpaceIdsField();   // 兼容旧数据：确保 spaceIds 字段存在
@@ -192,37 +230,23 @@ async function loadAll() {
   if (needsEncrypt) await saveSettings();
 }
 async function saveSettings() {
-  await ensureDataDir();
-  // 落盘时对 providers token 加密（内存 settings 保持明文供调用）
+  // 落盘时对 providers token 加密（内存 settings 保持明文供调用）；SQLite 单行事务，天然原子
   const snapshot = {
     ...settings,
     providers: settings.providers.map(p => ({ ...p, token: p.token ? encryptToken(p.token) : '' }))
   };
-  await writeJsonAtomic(SETTINGS_FILE, snapshot);
+  db.prepare("INSERT OR REPLACE INTO kv (k, data) VALUES ('settings', ?)").run(JSON.stringify(snapshot));
 }
 async function saveRepos() {
-  await ensureDataDir();
-  await writeJsonAtomic(REPOS_FILE, repos);
+  // 整表快照式替换（与旧整文件写同语义）：单事务原子，无需写队列
+  db.exec('BEGIN');
+  try {
+    db.prepare('DELETE FROM repos').run();
+    const ins = db.prepare('INSERT INTO repos (id, data) VALUES (?, ?)');
+    for (const r of repos) ins.run(String(r.id), JSON.stringify(r));
+    db.exec('COMMIT');
+  } catch (e) { try { db.exec('ROLLBACK'); } catch {} throw e; }
   broadcastSse('repos-changed', { t: Date.now() }); // 推送前端刷新（替代 4s 轮询）
-}
-// JSON 落盘原子化：先写临时文件再 rename 原子替换（防并发写交错产生损坏 JSON，损坏会被 loadAll 静默当空）。
-// 同一文件的并发写经尾随链串行化；rename 在 Windows 上遇目标被占用（杀毒/备份）会 EPERM/EBUSY，退避重试，仍失败明确报错不静默。
-const writeQueues = new Map(); // file -> 上一次写盘 Promise（尾随链）
-function writeJsonAtomic(file, data) {
-  const task = (writeQueues.get(file) || Promise.resolve()).catch(() => {}).then(() => doWriteJson(file, data));
-  writeQueues.set(file, task.catch(() => {})); // 单次失败不断链
-  return task;
-}
-async function doWriteJson(file, data) {
-  const tmp = file + '.tmp';
-  await fs.writeFile(tmp, JSON.stringify(data, null, 2));
-  for (let i = 0; ; i++) {
-    try { await fs.rename(tmp, file); return; }
-    catch (e) {
-      if (i >= 4) { log(`warn: 持久化失败 ${file}: ${e.message}`); throw e; }
-      await new Promise(r => setTimeout(r, 50 * (i + 1)));
-    }
-  }
 }
 const RUNNING_STATUSES = ['cloning', 'indexing', 'removing', 'syncing'];
 // 启动自愈：进程被重启中断时，把卡在"运行中状态"的仓库重置为可重试，防永久处理中

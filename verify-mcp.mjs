@@ -14,6 +14,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 
 const ROOT = path.join(os.tmpdir(), 'cgm-verify-' + Date.now());
 const PORT = parseInt(process.env.VERIFY_PORT || '8872', 10);
@@ -106,7 +107,7 @@ async function main() {
   const provs = await (await fetch(H + '/api/providers')).json();
   check('GET /api/providers token → ***', provs.find((p) => p.id === pid)?.token === '***');
   await fetch(H + '/api/providers/' + pid, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'renamed', token: '••••1234' }) });
-  const raw = await fs.readFile(path.join(DATA, 'settings.json'), 'utf8');
+  const raw = new DatabaseSync(path.join(DATA, 'cgm.db')).prepare("SELECT data FROM kv WHERE k='settings'").get().data;
   check('PUT 掩码不覆盖真实 token（落盘仍加密非掩码）', !raw.includes('••••1234') && !raw.includes(SECRET) && raw.includes('"enc:'));
 
   // 8) 双 SSE 客户端隔离：工具结果只经 HTTP 返回发起方，SSE 流不出现 event: message
@@ -142,8 +143,13 @@ async function main() {
   check('并发操作后仓库最终被移除（串行完成，无交叉卡死）', removed);
   const hz = await (await fetch(H + '/healthz')).json();
   check('并发操作后 healthz 正常', hz.ok === true);
-  let jsonOk = true; try { JSON.parse(await fs.readFile(path.join(DATA, 'repos.json'), 'utf8')); } catch { jsonOk = false; }
-  check('repos.json 未损坏（原子写）', jsonOk);
+  let jsonOk = true, rowCount = -1;
+  try {
+    const rows = new DatabaseSync(path.join(DATA, 'cgm.db')).prepare('SELECT data FROM repos').all();
+    rowCount = rows.length;
+    for (const r of rows) JSON.parse(r.data); // 每行载荷可解析 = 注册表未损坏
+  } catch { jsonOk = false; }
+  check('SQLite repos 表未损坏（并发操作后行数一致且可解析）', jsonOk && rowCount === 0, 'rows=' + rowCount);
   sA.kill('SIGTERM');
 
   /* ---------- 实例 B：LOCAL_NO_AUTH=0 + ADMIN_TOKEN（鉴权强制） ---------- */
@@ -174,6 +180,24 @@ async function main() {
   check('auth.json 已生成随机令牌', typeof authJson?.adminToken === 'string' && authJson.adminToken.length >= 24);
   check('对外实例 healthz → 200', (await fetch(`http://127.0.0.1:${PORT_EXPOSED}/healthz`)).status === 200);
   sC.kill('SIGTERM');
+
+  /* ---------- 实例 D：旧 settings.json/repos.json 自动迁移 → SQLite ---------- */
+  const DATA4 = path.join(ROOT, 'data-migrate');
+  await fs.mkdir(DATA4, { recursive: true });
+  await fs.writeFile(path.join(DATA4, 'repos.json'), JSON.stringify([{ id: 'seed-1', name: 'seed-repo', status: 'registered', worktrees: [], spaceIds: [] }]));
+  await fs.writeFile(path.join(DATA4, 'settings.json'), JSON.stringify({ providers: [{ id: 'p1', type: 'github', name: 'gh', url: '', token: 'plain-token-xyz' }], cloneBaseDir: '' }));
+  const sD = startServer({ PORT: String(PORT_EXPOSED + 1), DATA_DIR: DATA4 });
+  const B4 = `http://127.0.0.1:${PORT_EXPOSED + 1}`;
+  check('迁移实例启动', await waitReady(B4 + '/mcp'));
+  const list4 = await (await fetch(B4 + '/api/repos')).json();
+  check('旧 repos.json 迁移：仓库在列', list4.some((r) => r.id === 'seed-1'), `n=${list4.length}`);
+  const st4 = await (await fetch(B4 + '/api/settings')).json();
+  check('旧 settings.json 迁移：provider 在列且已加密', st4.providers?.some((p) => p.id === 'p1'));
+  check('迁移后 API 不泄露旧明文 token', !JSON.stringify(st4).includes('plain-token-xyz'));
+  const db4 = new DatabaseSync(path.join(DATA4, 'cgm.db'));
+  check('SQLite repos 表 1 行', db4.prepare('SELECT COUNT(*) AS n FROM repos').get().n === 1);
+  check('旧 JSON 已改名 .migrated-* 保留', !!(await fs.readdir(DATA4)).find((f) => f.startsWith('repos.json.migrated-')) && !!(await fs.readdir(DATA4)).find((f) => f.startsWith('settings.json.migrated-')));
+  sD.kill('SIGTERM');
 
   console.log(`\n==== verify-mcp：${fail === 0 ? 'ALL PASS ✅' : fail + ' FAIL ❌'} ====`);
   process.exit(fail === 0 ? 0 : 1);
