@@ -1,183 +1,214 @@
+<div align="center">
+
 # CodeGraph Manager
 
-<p align="center"><b>🇨🇳 中文</b> · <a href="README.en.md">🇬🇧 English</a></p>
+**把整个代码库变成 AI 能读懂的知识图谱。**
 
-服务器端代码索引管理服务——统一管理来自多个 Git 托管平台（GitLab / Gitee / GitHub）的仓库，自动克隆、用 [CodeGraph](https://github.com/colbymchenry/codegraph) 生成代码知识图谱，并通过 **MCP（Model Context Protocol）** 让 AI 代理直接检索代码。
+统一管理 GitLab / Gitee / GitHub 仓库，自动用 [CodeGraph](https://github.com/colbymchenry/codegraph) 构建代码知识图谱，
+通过 **MCP（Model Context Protocol）** 让 Cursor、Claude 等 AI 代理直接检索你的代码。
 
-**零依赖 Node 后端 + 原生 JS 前端**，单命令启动，无需数据库、无需构建。
+[![Node](https://img.shields.io/badge/node-%E2%89%A522.5-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](#-依赖)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#-license)
+[![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-8A2BE2)](#-mcp-接入)
+
+🇨🇳 中文 · <a href="README.en.md">🇬🇧 English</a>
+
+</div>
+
+---
+
+零依赖 Node 后端 + 单文件原生 JS 前端，**一条命令启动**：无需数据库安装、无需构建步骤、无需 Docker。
+仓库 clone → 索引 → AI 检索全流程自动化，Token 加密落盘，数据一个目录全带走。
 
 ## ✨ 功能
 
-- **多提供商仓库管理**：一个界面统一管理 GitLab / Gitee / GitHub 三个平台的仓库（配置列表 + 弹窗新增，token 脱敏）
-- **代码索引**：`clone → analyze → status → remove` 全流程，基于 CodeGraph 生成符号/文件/调用关系图谱
-- **跨源搜索**：一次关键词搜索所有已配置的提供商，结果合并展示（带来源标签）
-- **本地仓库支持**：直接纳入已克隆的本地目录（自动识别 Git 远程和分支）
-- **多分支策略（worktree）**：每个仓库可按分支名懒加载切出独立 `git worktree` 并各自建索引；MCP `search_code` 传 `branch` 即检索该分支代码；主仓库 `.gitignore` 自动豁免 `worktrees/`，主索引不混入分支代码
-- **异步懒加载**：首次检索某分支时若尚未建索引，后台自动 `fetch + worktree add + codegraph init`，立即返回"分支索引创建中，请稍后重试"，建好后即可检索；脏注册/残留目录自动自愈
-- **仓库级联展示**：UI 主仓库行下展开各分支 worktree 子行（缩进 + 蓝色分支标识 + 独立状态），支持单独删除某分支 worktree
-- **Token 加密存储**：提供商 token 以 AES-256-GCM 落盘加密（密钥 `ENCRYPTION_KEY` 或自动生成的 `.key`），内存明文，调用点无感
-- **跨仓聚合检索**：`search_code` 不指定 repo 时并发检索所有已索引仓库，命中数排序 + 每仓收敛 + 总量 cap，避免上下文爆炸
-- **启动自愈**：重启后中断的 `cloning/indexing/removing/syncing` 状态自动重置为可重试
-- **定时同步**：Settings 页可配置自动同步频率（小时），0 关闭，保存即重建定时器
-- **浅克隆提速**：`git clone --depth 1`（检索无需历史，clone 提速 10x 级），worktree 分支同样浅 fetch
-- **索引限流队列**：codegraph init/sync 经全局队列限流（`QUEUE_CONCURRENCY`，默认 2），多仓并发不抢 CPU/IO，避免 SQLite db 锁竞争（EBUSY）
-- **实时状态推送**：仓库状态变更经 SSE（`/mcp` 事件流）实时推送前端，30s 兜底轮询防连接僵尸
-- **克隆健壮性**：clone 前清理残留目录，避免 `already exists` 失败
-- **MCP 服务器**：`POST /mcp`（Streamable HTTP / JSON-RPC），暴露 4 个工具让 AI 检索代码
-  - `search_code` —— 指定仓库（及可选分支）检索代码图谱（内部经 projectPath 映射调用 CodeGraph 原生 MCP）
-- **CLI 一键启动**：`npm i -g .` 后任意目录 `cgm` 即起（`node cli.mjs` 等价）；`CODEGRAPH_BIN` 自动探测（PATH 里的 codegraph → npm 全局 shim），Windows 不再需要手配 JSON 数组
-- **Vercel 风深色 UI**：纯黑底 + 极简留白 + 平滑动效
+**仓库管理**
+- 多提供商统一管理 —— GitLab / Gitee / GitHub 多实例并存，跨源搜索一次出结果
+- 全生命周期 —— `clone → analyze → sync → remove` 一键流转，浅克隆提速 10 倍级
+- 本地仓库直纳 —— 已克隆目录直接注册，自动识别 Git 远程
+- 多分支 worktree —— 按分支懒加载切出独立 worktree 并各建索引，AI 可检索任意分支；主索引自动豁免不污染
+- 空间分组 —— 仓库打标签分组，界面按空间筛选
+- 定时保新鲜 —— 可配置周期自动 `git pull + sync`；拉取失败明确标记 `pull_failed`，不假装索引是最新的
 
-## 📸 界面截图
+**AI 检索（MCP）**
+- 4 个 MCP 工具（Streamable HTTP / JSON-RPC 2.0），跨仓聚合检索：并发查所有已索引仓库，命中排序 + 每仓收敛，上下文不爆炸
+- 首次检索未建索引的分支自动后台建索引，完成后即可用
 
-**概览（指标卡 + 顶部导航）**
-![概览](public/img/index.png)
+**安全**
+- 路由级鉴权 —— `/api/*` 与 `/mcp*` 分别持 `ADMIN_TOKEN` / `MCP_TOKEN`，`timingSafeEqual` 恒时比较
+- 回环免鉴权 —— 本机访问默认放行（同源校验防网页打本地），对外开放时 fail-closed：无 token 拒绝启动
+- 首启自动生成随机令牌（192bit）持久化到 `auth.json`，不用手动配也能安全对外开放
+- Token 三重防护 —— 落盘 AES-256-GCM 加密、API 返回脱敏（掩码+末4位）、PUT 掩码不覆盖真值
+- 请求体 1MB 上限（413）、跨源 Origin 一律 401、`X-Forwarded-For` 仅信可信代理
 
-**仓库管理（克隆 · 分析 · 移除）**
-![仓库管理](public/img/repo-show.png)
+**工程化**
+- SQLite 存储（`node:sqlite`，零 npm 依赖）—— 事务原子写，旧 JSON 首启自动迁移
+- 三级并发治理 —— 全局索引队列限流 + 单仓生命周期互斥 + 每文件写串行，多仓并发不互踩
+- 重启自愈 —— 中断的运行中状态自动重置；`CODEGRAPH_BIN` 自动探测，Windows 无需手配
+- SSE 实时推送状态，30s 兜底轮询；`BASE_PATH` 支持反代子路径部署
+- 内置回归脚本 `node verify-mcp.mjs`（49 项断言：协议合规 / 鉴权 / 脱敏 / 并发 / 迁移）
 
-**添加提供商（弹窗选择平台 / Gitee / GitHub）**
-![添加提供商](public/img/add-provider.png)
+## 📸 界面
 
-**设置（提供商配置列表）**
-![设置](public/img/setting.png)
-
-## 🧰 MCP 工具
-
-| 工具 | 说明 |
+| 概览 | 仓库管理 |
 |---|---|
-| `query_repository(name)` | 按仓库名查本地路径(projectPath)/状态/提供商 |
-| `list_repositories(status?)` | 列出所有已注册仓库，可按状态过滤 |
-| `search_repositories(query)` | 模糊搜索仓库名 |
-| `search_code(query, repo?, branch?, maxFiles?)` | **检索代码**：repo→projectPath 映射后调用 CodeGraph 知识图谱，返回符号/文件/调用关系。传 `branch` 则在该分支的 worktree 索引上检索（首次自动后台建索引，返回"稍后重试"） |
+| ![概览](public/img/index.png) | ![仓库管理](public/img/repo-show.png) |
 
-示例调用（按分支检索）：
-```json
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_code","arguments":{"query":"AuthService loginUser","repo":"tineco-nmp","branch":"dev_ibu","maxFiles":12}}}
-```
-
-> 多分支说明：仓库默认浅克隆（`--depth 1`，检索无需历史），主仓库索引只含默认分支；指定 `branch` 时后端自动 `git worktree add` 切出该分支并独立建索引，主索引通过 `.gitignore` 豁免 `worktrees/` 不被污染。
-
-## 📦 依赖
-
-| 组件 | 说明 |
+| 添加提供商 | 设置 |
 |---|---|
-| **CodeGraph** | `npm i -g @colbymchenry/codegraph`（MIT 许可） |
-
-> 其余全部为 Node.js 内置模块（`http`/`fetch`/`child_process`），零额外依赖。
+| ![添加提供商](public/img/add-provider.png) | ![设置](public/img/setting.png) |
 
 ## 🚀 快速开始
 
-### 1. 安装 CodeGraph
-```bash
-npm i -g @colbymchenry/codegraph
-```
-
-### 2. 启动服务（一键）
-
-**一键脚本**（自动安装缺失依赖 Node.js → git → CodeGraph → cgm，已装的自动跳过，装完直接启动）：
+**一键安装**（自动装齐 Node → git → CodeGraph → cgm，已装的自动跳过）：
 
 ```bash
-# Linux / macOS
-bash install.sh --port 8801
-
-# Windows：双击 install.cmd，或
-.\install.cmd --port 8801
+bash install.sh --port 8801          # Linux / macOS
+.\install.cmd --port 8801            # Windows（或双击 install.cmd）
 ```
 
-**手动方式**：
+**手动安装**：
 
 ```bash
-npm i -g codegraph-manager   # 方式一：安装 npm 发布版
-npm i -g .                   # 方式二：在本项目根目录装成全局命令（效果同上）
-cgm                          # 任意目录一键启动：自动探测 codegraph，零配置
-
-# 不装全局的等价方式
-node cli.mjs      # 或 node server.mjs / npm start
+npm i -g @colbymchenry/codegraph     # 唯一外部依赖
+npm i -g codegraph-manager           # 或在本仓库根目录 npm i -g .
+cgm                                  # 任意目录一键启动
 ```
 
-常用参数（优先级：命令行参数 > 环境变量 > 默认值）：
-```bash
-cgm --port 9000 --data /srv/cgm-data   # 自定义端口与数据目录
-HOST=0.0.0.0 ADMIN_TOKEN=xxx cgm       # 对外开放（务必配 ADMIN_TOKEN）
+打开 **http://127.0.0.1:8801** → Settings 添加提供商 → Add Selected → Clone & Analyze，完成。
+
+> CLI 参数优先级：命令行 > 环境变量 > 默认值。`cgm --port 9000 --data /srv/cgm-data`
+
+## 🔌 MCP 接入
+
+MCP 端点：`http://127.0.0.1:8801/mcp`（Streamable HTTP / JSON-RPC 2.0）
+
+**Cursor / Claude Desktop / Cline**（`mcpServers` 标准格式，本仓库附带 `mcp-config.json`）：
+
+```json
+{
+  "mcpServers": {
+    "cgm": {
+      "url": "http://127.0.0.1:8801/mcp",
+      "headers": { "Authorization": "Bearer <你的令牌>" }
+    }
+  }
+}
 ```
 
-> `CODEGRAPH_BIN` 无需手动配置：未设置时自动探测 PATH 里的 `codegraph`，探测不到再找 npm 全局包的 `npm-shim.js`（Windows bash shim 场景自动转 `["node", "<shim>"]` 形式）。仍可 `cgm --codegraph <bin>` 显式覆盖。
+> 本机访问默认免鉴权，`headers` 可省略。令牌从哪来：首次启动日志，或 `<DATA_DIR>/auth.json` 的 `adminToken`；也可用环境变量 `ADMIN_TOKEN` 显式指定。只能填 URL 的客户端可用 `?token=<令牌>` 兜底。
 
-### 3. 访问界面
-打开 **http://127.0.0.1:8801**
+### 工具列表
 
-### 4. 配置提供商 & MCP
-- **界面**：Settings → Add Provider → 选平台 → 填 URL/token → Save → Add Selected 仓库 → Clone/Analyze
-- **MCP 客户端**（Cursor / Claude Desktop / 自定义 Agent）：
-  ```
-  远程 MCP 地址：http://127.0.0.1:8801/mcp
-  ```
-  或用项目内提供的 `mcp-config.json`（标准 `mcpServers` 格式）。
+| 工具 | 说明 |
+|---|---|
+| `query_repository(name)` | 按名查仓库：本地路径 / 状态 / 提供商 |
+| `list_repositories(status?)` | 列出注册仓库，可按状态过滤 |
+| `search_repositories(query)` | 模糊搜索仓库名 |
+| `search_code(query, repo?, branch?, maxFiles?)` | **核心检索**：查 CodeGraph 知识图谱，返回符号 / 文件 / 调用关系。不传 `repo` 则跨所有已索引仓库聚合 |
 
-## ⚙️ 环境变量
+按分支检索示例：
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"tools/call",
+ "params":{"name":"search_code","arguments":{"query":"AuthService loginUser","repo":"tineco-nmp","branch":"dev_ibu","maxFiles":12}}}
+```
+
+## ⚙️ 配置
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `PORT` | `8801` | 监听端口 |
-| `HOST` | `127.0.0.1` | 监听地址（`0.0.0.0` 对外开放，需配 `ADMIN_TOKEN` + 反代） |
-| `DATA_DIR` | `<工作目录>/data` | 数据目录（`settings.json` 含提供商注册 + token，`repos.json` 仓库注册表；克隆仓库默认存于 `<DATA_DIR>/repos`） |
-| `CODEGRAPH_BIN` | 自动探测 | CodeGraph 可执行：先探 PATH 里的 `codegraph`，再找 npm 全局包 `npm-shim.js`（Windows bash shim 自动转 `["node","<shim>"]`）。仍可显式指定：绝对路径或 JSON 数组形式 |
-| `SYNC_HOURS` | `6` | 已索引仓库定时 `git pull + codegraph sync` 保新鲜（小时），`0` 关闭 |
-| `QUEUE_CONCURRENCY` | `2` | 全局索引队列并发数（codegraph init/sync 限流） |
-| `ADMIN_TOKEN` | — | 对外开放时 API 访问令牌 |
+| `PORT` / `HOST` | `8801` / `127.0.0.1` | 监听地址；`HOST` 非回环时必须配 token（无则拒绝启动） |
+| `DATA_DIR` | `<cwd>/data` | 数据目录（`cgm.db` + 克隆仓库默认存 `<DATA_DIR>/repos`） |
+| `ADMIN_TOKEN` | 自动生成 | `/api/*` 令牌；未设置时首启生成随机值写入 `auth.json` |
+| `MCP_TOKEN` | 回落 `ADMIN_TOKEN` | `/mcp*` 令牌（自用只配一个变量即可） |
+| `LOCAL_NO_AUTH` | `1` | 回环免鉴权开关；设 `0` 本机也强制鉴权 |
+| `BASE_PATH` | 空 | 反代子路径（如设 `/cgm` 后经 `/cgm/mcp` 访问） |
+| `MAX_BODY_BYTES` | `1048576` | 请求体上限，超限 413 |
+| `TRUSTED_PROXIES` | 空 | 逗号分隔可信代理 IP，仅对可信代理采信 `X-Forwarded-For` |
+| `CODEGRAPH_BIN` | 自动探测 | CodeGraph 可执行（PATH 探测 → npm 全局 shim → 显式指定） |
+| `SYNC_HOURS` | `6` | 定时同步周期（小时），`0` 关闭；UI Settings 可覆盖 |
+| `QUEUE_CONCURRENCY` | `2` | 索引队列并发数 |
+| `ENCRYPTION_KEY` | 自动生成 `.key` | 64 位 hex，AES-256-GCM 密钥 |
 
-## 🚢 发布（维护者）
+## 🔒 安全模型
 
-推送 `v*` tag 触发 GitHub Actions 自动发布到 npm（`publish` job：tag 与 `package.json` 版本一致性校验 → `npm pack --dry-run` 预览 → `npm publish --provenance`）。前提：仓库 Settings → Secrets and variables → Actions 配置 `NPM_TOKEN`（npmjs.com 生成的 Automation Token）。
+| 场景 | 行为 |
+|---|---|
+| 本机 127.0.0.1 访问 | 默认免鉴权（开发/自用友好），跨源网页请求仍被 401 拦截 |
+| 局域网 / 远程访问 | 必须持令牌（Bearer 头 / `?token=` / Cookie 任一） |
+| `HOST=0.0.0.0` 且无令牌 | 启动时用自动生成的随机令牌兜底，日志打印令牌位置 |
+| 令牌泄露面 | 落盘加密 + API 脱敏 + 首启仅日志打印一次 |
 
-```bash
-npm version patch   # 或 minor / major：更新 package.json 并自动创建 tag
-git push --follow-tags
-```
-
-## 🗂 目录结构
-
-```
-codegraph-manager/
-├── install.sh         Linux/macOS 一键安装（Node→git→codegraph→cgm→启动）
-├── install.cmd/.ps1   Windows 一键安装（install.cmd 双击入口）
-├── cli.mjs            CLI 入口（cgm 命令：一键启动，参数 > env > 默认值）
-├── server.mjs         零依赖 HTTP 后端（提供商 CRUD、仓库操作、/mcp 路由、静态服务）
-├── mcp.mjs            MCP 服务器模块（4 工具 + CodeGraph stdio 网关客户端）
-├── public/index.html  Vercel 风前端（single-file）
-├── package.json       元数据（bin: cgm / npm start；零依赖）
-├── DEPLOY-Linux.md    Linux systemd/systemd 部署说明
-└── .gitignore         排除 data/ 敏感数据
-```
+`data/` 已被 `.gitignore` 排除，真实 token 永不入库。对外开放建议叠加 Nginx 反代 + HTTPS（见 [DEPLOY-Linux.md](DEPLOY-Linux.md)）。
 
 ## 🔌 API 参考
 
 | 端点 | 方法 | 说明 |
 |---|---|---|
-| `/healthz` | GET | 存活探针（返回仓库数与运行时长，无鉴权） |
-| `/api/settings` | GET/PUT | 全局配置（cloneBaseDir / activeProviderId / autoSyncHours） |
-| `/api/providers` | GET/POST | 提供商列表（token 脱敏）/ 新增 |
-| `/api/providers/:id` | PUT/DELETE | 更新 / 删除提供商 |
-| `/api/providers/check` | POST | 测试连接（内存校验，不落盘） |
-| `/api/providers/projects` | GET | 跨源搜索项目（`q=`+`providerId=all`） |
-| `/api/repos` | GET/POST | 仓库注册表 |
-| `/api/repos/local` | POST | 添加本地仓库 |
-| `/api/repos/:id/{clone,analyze,status,remove,sync}` | POST | 仓库操作（clone/analyze/sync 立即返回，后台异步执行） |
-| `/mcp` | POST(HTTP)/OAuth | MCP 端点（JSON-RPC 2.0，Streamable HTTP） |
-| `/mcp/message` | POST | MCP SSE 消息端点 |
+| `/healthz` | GET | 存活探针（无鉴权） |
+| `/api/settings` | GET/PUT | 全局配置（返回值 token 已脱敏） |
+| `/api/providers[/...]` | GET/POST/PUT/DELETE | 提供商 CRUD + 连接测试 + 跨源项目搜索 |
+| `/api/repos[/local]` | GET/POST | 仓库注册表 / 添加本地仓库 |
+| `/api/repos/:id/{clone,analyze,status,remove,sync}` | POST | 单仓操作（异步执行，同仓操作自动排队互斥） |
+| `/api/repos/:id/worktree/:branch` | POST/DELETE | 分支 worktree 创建 / 删除 |
+| `/api/spaces[/...]` | GET/POST/PUT/DELETE | 空间分组管理 / 仓库绑定 |
+| `/api/browse?path=` | GET | 服务端目录浏览（添加本地仓库用） |
+| `/mcp` · `/mcp/message` | POST/GET | MCP 端点（Streamable HTTP + SSE） |
 
-## 🔒 安全说明
+## ❓ 常见问题
 
-- `data/` 已被 `.gitignore` 排除——**真实 GitLab/Gitee/GitHub token 只存服务端数据目录，永不提交到 git**
-- `.gitignore` 仅排除运行时数据，源码完整入库
-- 服务默认仅监听 `127.0.0.1`；对外开放需 `HOST=0.0.0.0` + `ADMIN_TOKEN` + Nginx 反向代理（见 `DEPLOY-Linux.md`）
-- MCP 端点无认证（本机服务）——仅限可信网络使用
+<details>
+<summary><b>启动报 codegraph ENOENT？</b></summary>
 
-## 🤝 用途
+Windows 全局安装的 codegraph 是 bash shim，PATH 直接 spawn 不通。本服务会自动探测并转成 `["node", "<shim>"]` 形式；老版本升级后无需再手配 `CODEGRAPH_BIN`。
+</details>
 
-适合把公司内网多个代码平台（GitLab 等）的仓库统一索引，供 AI 编码代理（Cursor、Claude Code、Hermes 等）通过 MCP 检索代码，实现跨仓库的符号定位、调用关系分析和影响范围评估。
+<details>
+<summary><b>配了 ADMIN_TOKEN 后前端一直 401？</b></summary>
+
+页面会弹出令牌输入框，粘贴令牌即可（存浏览器 localStorage）。或清除 localStorage 里的 `cgm_token` 重新输入。
+</details>
+
+<details>
+<summary><b>数据会丢吗？</b></summary>
+
+所有数据在 `<DATA_DIR>` 一个目录（SQLite + 密钥 + auth.json），备份 = 拷贝目录。旧版 JSON 文件首启自动迁移，原文件改名 `*.json.migrated-*` 保留，删掉 `cgm.db*` 改回原名即可回退。
+</details>
+
+<details>
+<summary><b>检索结果过时？</b></summary>
+
+看仓库状态列：`pull_failed` 表示定时同步拉取失败（下轮自动重试）；也可手动点 Sync。索引基于 CodeGraph 增量 sync。
+</details>
+
+## 🛠 开发
+
+```bash
+git clone https://github.com/Zhao-T-X/CGM.git && cd CGM
+node server.mjs                # 开发启动（127.0.0.1:8801）
+node verify-mcp.mjs            # 回归测试：49 项断言（协议/鉴权/安全/并发/迁移）
+```
+
+```
+codegraph-manager/
+├── cli.mjs            CLI 入口（cgm 命令）
+├── server.mjs         HTTP 后端（路由鉴权、提供商/仓库/空间、SQLite 持久化）
+├── mcp.mjs            MCP 模块（4 工具 + CodeGraph stdio 网关客户端）
+├── verify-mcp.mjs     回归脚本（49 项断言，临时实例隔离运行）
+├── public/index.html  前端单文件（Vercel 风深色 UI）
+└── install.sh/.cmd    一键安装脚本
+```
+
+## 🚢 发布（维护者）
+
+推送 `v*` tag 触发 GitHub Actions 自动发 npm（tag 与版本校验 → `npm pack --dry-run` → `npm publish --provenance`，需配置 `NPM_TOKEN`）。
+
+```bash
+npm version patch && git push --follow-tags
+```
 
 ## 📄 License
 
-MIT（CodeGraph 为 MIT；本项目原生代码可按需选择许可）。
+MIT
