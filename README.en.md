@@ -28,6 +28,7 @@ The whole pipeline — clone → index → AI retrieval — runs automatically. 
 - Local repos — register an already-cloned directory directly (auto-detects Git remote)
 - Branch worktrees — lazily spin up an isolated worktree per branch with its own index, so AI can query any branch; the main index stays clean automatically
 - Spaces — tag repos into groups and filter the UI by space
+  - Create: `All spaces → New Space` (top right); assign: `+ Spaces` on a repository row
 - Scheduled freshness — configurable auto `git pull + sync`; a failed pull is marked `pull_failed` instead of pretending the index is fresh
 
 **AI retrieval (MCP)**

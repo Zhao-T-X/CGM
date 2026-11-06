@@ -180,7 +180,7 @@ tailwind.config = {
       </div>
       <div class="flex-1"></div>
       <div class="relative">
-        <button id="spaceTrigger" onclick="toggleSpaceMenu()" title="Switch space"
+        <button id="spaceTrigger" onclick="toggleSpaceMenu()" title="Filter or create spaces"
           class="flex items-center gap-2 bg-surface-elevated border border-white/[0.04] text-text-secondary font-medium text-[13px] px-3 py-1.5 rounded-sm cursor-pointer hover:border-white/[0.07] hover:text-text-primary transition-colors">
           <span id="spaceTriggerLabel">All</span>
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
@@ -459,14 +459,38 @@ tailwind.config = {
   </div>
 </div>
 
+<!-- Create space -->
+<div id="newSpaceOverlay" onclick="if(event.target===this)closeNewSpace()"
+  class="fixed inset-0 z-[100] hidden [&.show]:flex items-center justify-center animate-fadeIn">
+  <div class="bg-surface border border-white/[0.07] rounded-lg p-8 w-full max-w-[420px] shadow-modal">
+    <div class="text-[16px] font-semibold mb-2 tracking-[-0.01em]">New space</div>
+    <p class="text-[12px] text-text-tertiary mb-5">Group repositories by team, product, or environment.</p>
+    <input id="newSpaceName" placeholder="e.g. Platform, Mobile, Aftersales" onkeydown="if(event.key==='Enter')createSpaceFromModal()"
+      class="form-input h-9 w-full px-3 bg-surface-elevated border border-white/[0.04] rounded-sm text-text-primary text-[14px] outline-none focus:border-accent placeholder:text-text-quaternary transition-colors">
+    <div id="newSpaceState" class="text-[11px] text-text-tertiary mt-2"></div>
+    <div class="flex gap-2 justify-end mt-6">
+      <button onclick="closeNewSpace()"
+        class="inline-flex items-center gap-2 h-8 px-4 rounded-sm font-medium text-[13px] text-text-secondary bg-surface-elevated border border-white/[0.04] hover:text-text-primary hover:border-white/[0.07] hover:bg-surface-hover cursor-pointer transition-colors">Cancel</button>
+      <button onclick="createSpaceFromModal()"
+        class="inline-flex items-center gap-2 h-8 px-4 rounded-sm font-medium text-[13px] text-black bg-accent hover:bg-accent-hover cursor-pointer border-0 transition-colors">Create space</button>
+    </div>
+  </div>
+</div>
+
 <!-- Space bindings -->
 <div id="spaceOverlay" onclick="if(event.target===this)closeSpaceDialog()"
   class="fixed inset-0 z-[100] hidden [&.show]:flex items-center justify-center animate-fadeIn">
-  <div class="bg-surface border border-white/[0.07] rounded-lg p-8 w-full max-w-[440px] shadow-modal">
+  <div class="bg-surface border border-white/[0.07] rounded-lg p-8 w-full max-w-[440px] max-h-[80vh] overflow-y-auto shadow-modal">
     <div class="text-[16px] font-semibold mb-2 tracking-[-0.01em]">Spaces</div>
     <p id="spaceDialogRepo" class="text-[12px] text-text-tertiary mb-5"></p>
     <div id="spaceDialogList" class="flex flex-col gap-2 mb-5"></div>
-    <div id="spaceDialogEmpty" class="hidden text-[12px] text-text-tertiary mb-5">No spaces yet. Create one from the space menu in the top bar.</div>
+    <div id="spaceDialogEmpty" class="hidden text-[12px] text-text-tertiary mb-5">No spaces yet. Create one below or from the space menu.</div>
+    <div class="flex gap-2">
+      <input id="newSpaceNameInline" placeholder="New space for this repo" onkeydown="if(event.key==='Enter')createSpaceInline()"
+        class="form-input h-9 flex-1 min-w-0 px-3 bg-surface-elevated border border-white/[0.04] rounded-sm text-text-primary text-[14px] outline-none focus:border-accent placeholder:text-text-quaternary transition-colors">
+      <button onclick="createSpaceInline()"
+        class="inline-flex items-center gap-2 h-9 px-4 rounded-sm font-medium text-[13px] text-text-secondary bg-surface-elevated border border-white/[0.04] hover:text-text-primary hover:border-white/[0.07] hover:bg-surface-hover cursor-pointer transition-colors whitespace-nowrap">Create &amp; assign</button>
+    </div>
     <div class="flex gap-2 justify-end mt-6">
       <button onclick="closeSpaceDialog()"
         class="inline-flex items-center gap-2 h-8 px-4 rounded-sm font-medium text-[13px] text-text-secondary bg-surface-elevated border border-white/[0.04] hover:text-text-primary hover:border-white/[0.07] hover:bg-surface-hover cursor-pointer transition-colors">Cancel</button>
@@ -584,12 +608,15 @@ function renderSpaces(){const menu=$('spaceMenu');if(!menu)return;const sorted=[
       <span class="name flex-1 overflow-hidden text-ellipsis whitespace-nowrap">${s.builtin?'All':esc(s.name)}</span>
       ${s.builtin?'':`<span class="del opacity-0 text-text-quaternary text-[14px] leading-none px-1 rounded-xs transition-all hover:opacity-100 hover:text-error hover:bg-error-dim">×</span>`}
     </div>`).join('')
-    + `<div class="flex items-center gap-2 px-3 py-3 border-t border-white/[0.04] mt-0.5 text-accent font-medium text-[13px] cursor-pointer rounded-sm hover:bg-accent-dim transition-colors" onclick="addSpace()">
+    + `<div class="flex items-center gap-2 px-3 py-3 border-t border-white/[0.04] mt-0.5 text-accent font-medium text-[13px] cursor-pointer rounded-sm hover:bg-accent-dim transition-colors" onclick="openNewSpaceDialog()">
          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>New Space</div>`;}
 function toggleSpaceMenu(){const m=$('spaceMenu');m.style.display=m.style.display==='none'?'block':'none';}
 document.addEventListener('click',e=>{const w=e.target.closest('.space-select');if(!w)$('spaceMenu').style.display='none';});
 async function onSpaceSelect(id){currentSpace=id;renderSpaces();$('spaceMenu').style.display='none';switchView('repos');await loadRepos();}
-async function addSpace(){const name=prompt('New space name (e.g. Aftersales / Manning / Infra):');if(!name||!name.trim())return;const r=await api('/api/spaces',{method:'POST',body:JSON.stringify({name:name.trim()})});if(!r.id){toast(r.error||'Failed to create space','error');return;}toast('Space created — use + Spaces in the repository table to assign repos','success');await loadSpaces();}
+function openNewSpaceDialog(){$('spaceMenu').style.display='none';$('newSpaceName').value='';$('newSpaceState').textContent='';$('newSpaceOverlay').classList.add('show');setTimeout(()=>$('newSpaceName').focus(),0);}
+function closeNewSpace(){$('newSpaceOverlay').classList.remove('show');}
+async function createSpaceFromModal(){const name=$('newSpaceName').value.trim();if(!name){$('newSpaceState').textContent='Enter a space name.';return;}try{const r=await api('/api/spaces',{method:'POST',body:JSON.stringify({name})});if(!r.id){$('newSpaceState').textContent=r.error||'Failed to create space';return;}closeNewSpace();toast('Space created — use + Spaces in the repository table to assign repos','success');await loadSpaces();}catch(e){if(e.message!=='unauthorized')$('newSpaceState').textContent='Failed to create space: '+e.message;}}
+async function createSpaceInline(){const r=repos.find(x=>x.id===spaceDialogRepoId);if(!r)return;const input=$('newSpaceNameInline');const name=input.value.trim();if(!name){input.focus();return;}try{const sp=await api('/api/spaces',{method:'POST',body:JSON.stringify({name})});if(!sp.id){toast(sp.error||'Failed to create space','error');return;}await api(`api/spaces/${sp.id}/repos`,{method:'POST',body:JSON.stringify({repoId:r.id})});input.value='';await loadRepos();openSpaceDialog(spaceDialogRepoId);toast('Space created and assigned','success');}catch(e){if(e.message!=='unauthorized')toast('Failed to create space: '+e.message,'error');}}
 async function delSpace(id){const sp=spaces.find(s=>s.id===id);if(!sp||sp.builtin)return;if(!confirm(`Delete space "${sp.name}"?\nRepos bound to it will be unbound (the repos themselves are kept).`))return;const r=await api(`/api/spaces/${id}`,{method:'DELETE'});if(r.ok){toast('Space deleted','success');if(currentSpace===id)currentSpace='all';await loadSpaces();renderRepos();renderStats();}else toast(r.error||'Failed to delete space','error');}
 
 /* Repos — status badge 用 [&.failed]:text-error 等 Tailwind variant */
