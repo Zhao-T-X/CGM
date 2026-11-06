@@ -97,6 +97,12 @@ tailwind.config = {
   tr:hover td.ops{background:#111}
   #view-repos h1,#view-settings h1{font-size:32px;letter-spacing:-.04em;line-height:1.05}
   .ov-wrap{padding-top:4px}
+  .repo-tags{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:6px}
+  .repo-tags span{font-family:'Geist Mono',ui-monospace,monospace;font-size:10px;line-height:1.6;color:#a3a3a3;border:1px solid #ffffff26;padding:1px 5px}
+  .space-edit{border:0;background:none;color:#737373;font-size:11px;cursor:pointer;padding:0;text-decoration:underline;text-underline-offset:3px}
+  .space-edit:hover{color:#fff}
+  .space-tag{color:#a3a3a3}
+  #spaceDialogList input{accent-color:#fff}
   #toast:empty{display:none}
 </style>
 
@@ -453,6 +459,23 @@ tailwind.config = {
   </div>
 </div>
 
+<!-- Space bindings -->
+<div id="spaceOverlay" onclick="if(event.target===this)closeSpaceDialog()"
+  class="fixed inset-0 z-[100] hidden [&.show]:flex items-center justify-center animate-fadeIn">
+  <div class="bg-surface border border-white/[0.07] rounded-lg p-8 w-full max-w-[440px] shadow-modal">
+    <div class="text-[16px] font-semibold mb-2 tracking-[-0.01em]">Spaces</div>
+    <p id="spaceDialogRepo" class="text-[12px] text-text-tertiary mb-5"></p>
+    <div id="spaceDialogList" class="flex flex-col gap-2 mb-5"></div>
+    <div id="spaceDialogEmpty" class="hidden text-[12px] text-text-tertiary mb-5">No spaces yet. Create one from the space menu in the top bar.</div>
+    <div class="flex gap-2 justify-end mt-6">
+      <button onclick="closeSpaceDialog()"
+        class="inline-flex items-center gap-2 h-8 px-4 rounded-sm font-medium text-[13px] text-text-secondary bg-surface-elevated border border-white/[0.04] hover:text-text-primary hover:border-white/[0.07] hover:bg-surface-hover cursor-pointer transition-colors">Cancel</button>
+      <button onclick="saveSpaceBindings()"
+        class="inline-flex items-center gap-2 h-8 px-4 rounded-sm font-medium text-[13px] text-black bg-accent hover:bg-accent-hover cursor-pointer border-0 transition-colors">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast + Message Popover -->
 <div id="toast" class="toast fixed top-5 right-5 z-[200] px-5 py-3 rounded-md font-medium text-[13px] tracking-[0.01em] bg-surface border border-white/[0.07] shadow-toast"></div>
 <div id="msgPopover" class="hidden fixed z-[100] bg-surface border border-white/[0.07] rounded-md p-4 text-[13px] text-text-secondary max-w-[480px] max-h-[300px] overflow-y-auto whitespace-pre-wrap break-words shadow-popover"></div>
@@ -556,8 +579,8 @@ async function addSelected(){const items=[...selectedSet].map(i=>results[i]);if(
 async function loadSpaces(){spaces=await api('/api/spaces');renderSpaces();}
 function switchView(view){document.querySelectorAll('.nav-pill').forEach(x=>x.classList.toggle('active',x.dataset.view===view));document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active',v.id==='view-'+view));}
 function renderSpaces(){const menu=$('spaceMenu');if(!menu)return;const sorted=[...spaces].sort((a,b)=>(a.order??0)-(b.order??0));const cur=spaces.find(s=>s.id===currentSpace)||{};
-  $('spaceTriggerLabel').textContent=cur.builtin?'All':(cur.name||'All');
-  menu.innerHTML=sorted.map(s=>`<div class="[&.active]:text-accent flex items-center gap-3 px-3 py-2 rounded-sm cursor-pointer text-[13px] text-text-secondary hover:bg-surface-hover hover:text-text-primary transition-colors ${currentSpace===s.id?'active':''}" onclick="onSpaceSelect('${s.id}')">
+  $('spaceTriggerLabel').textContent=cur.builtin?'All spaces':(cur.name||'All spaces');
+  menu.innerHTML='<div class="px-3 pt-1 pb-2 text-[10px] text-text-quaternary tracking-[0.08em] uppercase">Filter by space</div>'+sorted.map(s=>`<div class="[&.active]:text-accent flex items-center gap-3 px-3 py-2 rounded-sm cursor-pointer text-[13px] text-text-secondary hover:bg-surface-hover hover:text-text-primary transition-colors ${currentSpace===s.id?'active':''}" onclick="onSpaceSelect('${s.id}')">
       <span class="name flex-1 overflow-hidden text-ellipsis whitespace-nowrap">${s.builtin?'All':esc(s.name)}</span>
       ${s.builtin?'':`<span class="del opacity-0 text-text-quaternary text-[14px] leading-none px-1 rounded-xs transition-all hover:opacity-100 hover:text-error hover:bg-error-dim">×</span>`}
     </div>`).join('')
@@ -566,11 +589,14 @@ function renderSpaces(){const menu=$('spaceMenu');if(!menu)return;const sorted=[
 function toggleSpaceMenu(){const m=$('spaceMenu');m.style.display=m.style.display==='none'?'block':'none';}
 document.addEventListener('click',e=>{const w=e.target.closest('.space-select');if(!w)$('spaceMenu').style.display='none';});
 async function onSpaceSelect(id){currentSpace=id;renderSpaces();$('spaceMenu').style.display='none';switchView('repos');await loadRepos();}
-async function addSpace(){const name=prompt('New space name (e.g. Aftersales / Manning / Infra):');if(!name||!name.trim())return;const r=await api('/api/spaces',{method:'POST',body:JSON.stringify({name:name.trim()})});if(!r.id){toast(r.error||'Failed to create space','error');return;}toast('Space created','success');
-  const list=await api('/api/repos');if(list.length){const picks=prompt('Optional: bind existing repos (enter repo numbers, comma separated; leave empty to skip):\n'+list.map((x,i)=>`${i+1}. ${x.name}`).join('\n'));if(picks&&picks.trim()){const idxs=picks.split(/[,\s]+/).map(s=>parseInt(s,10)-1).filter(i=>i>=0&&i<list.length);for(const i of idxs){await api(`/api/spaces/${r.id}/repos`,{method:'POST',body:JSON.stringify({repoId:list[i].id})});}if(idxs.length)toast(`Bound ${idxs.length} repo(s)`,'success');}}await loadSpaces();}
+async function addSpace(){const name=prompt('New space name (e.g. Aftersales / Manning / Infra):');if(!name||!name.trim())return;const r=await api('/api/spaces',{method:'POST',body:JSON.stringify({name:name.trim()})});if(!r.id){toast(r.error||'Failed to create space','error');return;}toast('Space created — use + Spaces in the repository table to assign repos','success');await loadSpaces();}
 async function delSpace(id){const sp=spaces.find(s=>s.id===id);if(!sp||sp.builtin)return;if(!confirm(`Delete space "${sp.name}"?\nRepos bound to it will be unbound (the repos themselves are kept).`))return;const r=await api(`/api/spaces/${id}`,{method:'DELETE'});if(r.ok){toast('Space deleted','success');if(currentSpace===id)currentSpace='all';await loadSpaces();renderRepos();renderStats();}else toast(r.error||'Failed to delete space','error');}
 
 /* Repos — status badge 用 [&.failed]:text-error 等 Tailwind variant */
+let spaceDialogRepoId='';
+function openSpaceDialog(repoId){const r=repos.find(x=>x.id===repoId);if(!r)return;spaceDialogRepoId=repoId;const list=spaces.filter(s=>!s.builtin);$('spaceDialogRepo').textContent=r.name;$('spaceDialogEmpty').classList.toggle('hidden',list.length>0);$('spaceDialogList').innerHTML=list.map(s=>`<label class="flex items-center gap-3 px-3 py-2 border border-white/[0.04] rounded-sm text-[13px] cursor-pointer hover:bg-surface-hover transition-colors"><input type="checkbox" value="${s.id}"${(r.spaceIds||[]).includes(s.id)?' checked':''} class="w-4 h-4 accent-white"><span>${esc(s.name)}</span></label>`).join('');$('spaceOverlay').classList.add('show');}
+function closeSpaceDialog(){$('spaceOverlay').classList.remove('show');}
+async function saveSpaceBindings(){const r=repos.find(x=>x.id===spaceDialogRepoId);if(!r)return;const checked=new Set([...$('spaceDialogList').querySelectorAll('input:checked')].map(i=>i.value));const current=new Set(r.spaceIds||[]);const add=[...checked].filter(id=>!current.has(id));const del=[...current].filter(id=>!checked.has(id));try{for(const id of add)await api(`api/spaces/${id}/repos`,{method:'POST',body:JSON.stringify({repoId:r.id})});for(const id of del)await api(`api/spaces/${id}/repos/${r.id}`,{method:'DELETE'});closeSpaceDialog();toast('Spaces updated','success');await loadRepos();}catch(e){if(e.message!=='unauthorized')toast('Failed to update spaces: '+e.message,'error');}}
 async function loadRepos(){repos=await api('/api/repos');spaces=await api('/api/spaces');renderSpaces();renderRepos();renderStats();renderConn();}
 function statusCls(cls){
   /* 把 status 的 class 映射成 Tailwind class 字符串 */
@@ -597,6 +623,8 @@ function repoList(){return currentSpace==='all'?repos:repos.filter(r=>(r.spaceId
 function repoLabel(r){return STATUS[r.status]?STATUS[r.status][1]:r.status;}
 function repoBusy(r){return ['cloning','indexing','removing'].includes(r.status);}
 function repoBad(r){return ['failed','pull_failed'].includes(r.status);}
+function spaceNames(r){const ids=r.spaceIds||[];return spaces.filter(s=>!s.builtin&&ids.includes(s.id)).map(s=>s.name);}
+function spaceInline(r){return spaceNames(r).map(n=>`<span class="space-tag">#${esc(n)}</span>`).join(' · ');}
 function renderStats(){
   const list=repoList();
   const total=list.length,indexed=list.filter(r=>r.status==='indexed').length,processing=list.filter(repoBusy).length,failed=list.filter(repoBad).length,cloned=list.filter(r=>r.status==='cloned').length;
@@ -640,7 +668,7 @@ function renderOverviewRows(list){
       :repoBusy(r)?'<button class="sig-action" disabled>Working</button>'
       :r.status==='cloned'?`<button class="sig-action" onclick="doOp('${r.id}','analyze')">Analyze</button>`
       :`<button class="sig-action" onclick="doOp('${r.id}','sync')">Sync</button>`;
-    return `<div class="sig-row"><div class="sig-repo"><b>${esc(r.name)}</b><small>${esc(PROVIDER_LABELS[r.providerType]||r.providerType||'local')} · ${esc(r.branch||'—')}</small></div><span class="sig-status ${tone}">${esc(repoLabel(r))}</span><span class="sig-path" title="${esc(r.localPath||'')}">${esc(shortPath(r.localPath))}</span><span class="sig-time">${timeAgo(r.addedAt)}</span>${action}</div>`;
+    return `<div class="sig-row"><div class="sig-repo"><b>${esc(r.name)}</b><small>${esc(PROVIDER_LABELS[r.providerType]||r.providerType||'local')} · ${esc(r.branch||'—')}${spaceNames(r).length?' · '+spaceInline(r):''}</small></div><span class="sig-status ${tone}">${esc(repoLabel(r))}</span><span class="sig-path" title="${esc(r.localPath||'')}">${esc(shortPath(r.localPath))}</span><span class="sig-time">${timeAgo(r.addedAt)}</span>${action}</div>`;
   }).join('');
 }
 
@@ -656,6 +684,7 @@ function renderRepos(){const tb=$('repoTbody');tb.innerHTML='';const list=curren
          <div class="repo-name font-medium tracking-[-0.005em] overflow-hidden text-ellipsis whitespace-nowrap">${esc(r.name)}</div>
          <div class="repo-url text-[12px] text-text-tertiary font-mono mt-0.5 overflow-hidden text-ellipsis whitespace-nowrap">${esc(r.gitUrl||'')}</div>
          ${msg?`<div class="repo-msg text-[12px] text-text-tertiary mt-0.5 max-w-[280px] whitespace-nowrap overflow-hidden text-ellipsis cursor-pointer relative" onclick="showMsg(this,${JSON.stringify(esc(msg)).replace(/"/g,'&quot;')})" title="Click to expand">${esc(shortMsg)}</div>`:''}
+         <div class="repo-tags">${spaceNames(r).map(n=>`<span>#${esc(n)}</span>`).join('')}<button class="space-edit" onclick="openSpaceDialog('${r.id}')">+ Spaces</button></div>
        </td>
        <td class="px-5 py-3 border-b border-white/[0.04] align-middle">
          <div class="repo-path text-[12px] text-text-secondary font-mono overflow-hidden text-ellipsis whitespace-nowrap" title="${esc(r.localPath||'')}">${esc(shortPath(r.localPath))}</div>
