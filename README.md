@@ -59,6 +59,8 @@
 |---|---|
 | ![添加提供商](public/img/add-provider.png) | ![设置](public/img/setting.png) |
 
+> 截图使用示例数据（Acme），不代表真实仓库内容。
+
 ## 🚀 快速开始
 
 **一键安装**（自动装齐 Node → git → CodeGraph → cgm，已装的自动跳过）：

@@ -58,6 +58,8 @@ The whole pipeline — clone → index → AI retrieval — runs automatically. 
 |---|---|
 | ![Add provider](public/img/add-provider.png) | ![Settings](public/img/setting.png) |
 
+> Screenshots use sample data (Acme), not real repositories.
+
 ## 🚀 Quick Start
 
 **One-click install** (installs anything missing: Node → git → CodeGraph → cgm, skips what's already there):
