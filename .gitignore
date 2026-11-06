@@ -13,3 +13,6 @@ node_modules/
 # 系统
 .DS_Store
 Thumbs.db
+# CodeGraph 本地索引（生成物，不进版本控制）
+.codegraph/
+
