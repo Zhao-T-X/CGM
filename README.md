@@ -38,6 +38,7 @@
 
 **安全**
 - 路由级鉴权 —— `/api/*` 与 `/mcp*` 分别持 `ADMIN_TOKEN` / `MCP_TOKEN`，`timingSafeEqual` 恒时比较
+- 角色化访问令牌 —— Settings → Access tokens 创建 `web` / `mcp` token；web 只能查看/操作授权空间内的仓库，mcp 只能检索授权空间，admin 无限制
 - 回环免鉴权 —— 本机访问默认放行（同源校验防网页打本地），对外开放时 fail-closed：无 token 拒绝启动
 - 首启自动生成随机令牌（192bit）持久化到 `auth.json`，不用手动配也能安全对外开放
 - Token 三重防护 —— 落盘 AES-256-GCM 加密、API 返回脱敏（掩码+末4位）、PUT 掩码不覆盖真值
@@ -159,6 +160,7 @@ MCP 端点：`http://127.0.0.1:8801/mcp`（Streamable HTTP / JSON-RPC 2.0）
 | `/api/repos/:id/{clone,analyze,status,remove,sync}` | POST | 单仓操作（异步执行，同仓操作自动排队互斥） |
 | `/api/repos/:id/worktree/:branch` | POST/DELETE | 分支 worktree 创建 / 删除 |
 | `/api/spaces[/...]` | GET/POST/PUT/DELETE | 空间分组管理 / 仓库绑定 |
+| `/api/tokens[/...]` | GET/POST/DELETE | 访问令牌管理（admin）：角色 + 空间范围 |
 | `/api/browse?path=` | GET | 服务端目录浏览（添加本地仓库用） |
 | `/mcp` · `/mcp/message` | POST/GET | MCP 端点（Streamable HTTP + SSE） |
 

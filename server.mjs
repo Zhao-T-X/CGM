@@ -104,7 +104,8 @@ function openDb() {
   db = new DatabaseSync(DB_FILE);
   db.exec('PRAGMA journal_mode=WAL');
   db.exec(`CREATE TABLE IF NOT EXISTS repos (id TEXT PRIMARY KEY, data TEXT NOT NULL);
-           CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, data TEXT NOT NULL);`);
+           CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, data TEXT NOT NULL);
+           CREATE TABLE IF NOT EXISTS api_tokens (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, roles TEXT NOT NULL, space_ids TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER, revoked_at INTEGER);`);
   migrateJsonToSqlite();
 }
 function migrateJsonToSqlite() {
@@ -490,16 +491,29 @@ function originMatchesHost(req) {
 function isLocalNoAuth(req) {
   return LOCAL_NO_AUTH && LOOPBACK_ADDRS.has(clientAddr(req)) && originMatchesHost(req);
 }
-// /api/* 守卫：回环豁免 → ADMIN_TOKEN
-function guardAdmin(req) {
-  if (isLocalNoAuth(req)) return true;
-  return tokenEquals(extractToken(req, {}, false), ADMIN_TOKEN);
+// /api/* 与 /mcp* 统一解析 principal：回环 admin → ADMIN_TOKEN → env MCP_TOKEN → 数据库 token
+function tokenHash(t) { return crypto.createHash('sha256').update(String(t)).digest('hex'); }
+function jsonArray(v) { try { const a = JSON.parse(v || '[]'); return Array.isArray(a) ? a : []; } catch { return []; } }
+function tokenRowDto(r) { return { id: r.id, name: r.name, roles: jsonArray(r.roles), spaceIds: jsonArray(r.space_ids), createdAt: r.created_at, lastUsedAt: r.last_used_at, revokedAt: r.revoked_at }; }
+function resolvePrincipal(req, query, allowQuery) {
+  if (isLocalNoAuth(req)) return { admin: true, roles: ['web', 'mcp'], spaceIds: null, name: 'local', source: 'loopback' };
+  const token = extractToken(req, query, allowQuery);
+  if (!token) return null;
+  if (tokenEquals(token, ADMIN_TOKEN)) return { admin: true, roles: ['web', 'mcp'], spaceIds: null, name: 'ADMIN_TOKEN', source: 'env' };
+  if (process.env.MCP_TOKEN && tokenEquals(token, MCP_TOKEN)) return { admin: false, roles: ['mcp'], spaceIds: null, name: 'MCP_TOKEN', source: 'env' };
+  let row = null;
+  try { row = db.prepare('SELECT * FROM api_tokens WHERE token_hash = ?').get(tokenHash(token)); } catch {}
+  if (!row || row.revoked_at) return null;
+  const now = Date.now();
+  if (!row.last_used_at || now - row.last_used_at > 60000) { try { db.prepare('UPDATE api_tokens SET last_used_at = ? WHERE id = ?').run(now, row.id); } catch {} }
+  const spaces = jsonArray(row.space_ids);
+  return { admin: false, roles: jsonArray(row.roles), spaceIds: spaces.length ? spaces : null, name: row.name, source: 'token', id: row.id };
 }
-// /mcp* 守卫：回环豁免 → MCP_TOKEN（未设置回落 ADMIN_TOKEN；?token= 兜底）
-function guardMcp(req, query) {
-  if (isLocalNoAuth(req)) return true;
-  return tokenEquals(extractToken(req, query, true), MCP_TOKEN);
-}
+const canWeb = (p) => !!p && (p.admin || p.roles.includes('web'));
+const canMcp = (p) => !!p && (p.admin || p.roles.includes('mcp'));
+function repoVisible(p, repo) { if (!p || p.admin || !p.spaceIds) return true; return (repo.spaceIds || []).some(id => p.spaceIds.includes(id)); }
+function visibleSpaces(p) { if (!p || p.admin || !p.spaceIds) return settings.spaces; return settings.spaces.filter(s => s.builtin || p.spaceIds.includes(s.id)); }
+function principalDto(p) { return { admin: p.admin, roles: p.roles, spaceIds: p.spaceIds, spaces: visibleSpaces(p).map(s => ({ id: s.id, name: s.name, builtin: !!s.builtin })), name: p.name, source: p.source }; }
 async function staticServe(req, res, pathname) {
   if (pathname === '/' || pathname === '/index.html') {
     const f = path.join(HERE, 'public', 'index.html');
@@ -735,16 +749,57 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/healthz') return sendJson(res, 200, { ok: true, repos: repos.length, uptime: Math.round(process.uptime()) });
     // MCP 端点（GET /mcp 走 SSE、POST 走消息；/mcp/message 走消息）—— 路由级守卫
     if (pathname === '/mcp' || pathname === '/mcp/message') {
-      if (!guardMcp(req, query)) return sendJson(res, 401, { error: 'unauthorized' });
+      const principal = resolvePrincipal(req, query, true);
+      if (!canMcp(principal)) return sendJson(res, 401, { error: principal ? 'mcp_role_required' : 'unauthorized' });
       if (pathname === '/mcp' && req.method === 'GET') return handleSseConnection(req, res);
-      return await handleMcpMessage(req, res, repos);
+      const visible = principal.spaceIds ? repos.filter(r => repoVisible(principal, r)) : repos;
+      return await handleMcpMessage(req, res, visible);
     }
     if (!pathname.startsWith('/api/')) return staticServe(req, res, pathname); // 页面本身公开（否则前端拿不到令牌表单）
-    if (!guardAdmin(req)) return sendJson(res, 401, { error: 'unauthorized' });
+    const principal = resolvePrincipal(req, {}, false);
+    if (!canWeb(principal)) return sendJson(res, 401, { error: principal ? 'web_role_required' : 'unauthorized' });
+    if (pathname === '/api/auth/me' && req.method === 'GET') return sendJson(res, 200, principalDto(principal));
+
+    // 访问令牌管理（仅 admin）
+    if (pathname === '/api/tokens') {
+      if (!principal.admin) return sendJson(res, 403, { error: 'admin_required' });
+      if (req.method === 'GET') return sendJson(res, 200, db.prepare('SELECT * FROM api_tokens ORDER BY created_at DESC').all().map(tokenRowDto));
+      if (req.method === 'POST') {
+        const b = await readBody(req);
+        const name = String(b.name || '').trim().slice(0, 80);
+        if (!name) return sendJson(res, 400, { error: 'missing name' });
+        const roles = [...new Set((Array.isArray(b.roles) ? b.roles : []).filter(r => r === 'web' || r === 'mcp'))];
+        if (!roles.length) return sendJson(res, 400, { error: 'missing role' });
+        const validSpaces = new Set(settings.spaces.filter(s => !s.builtin).map(s => s.id));
+        const requested = Array.isArray(b.spaceIds) ? b.spaceIds : [];
+        const spaceIds = [...new Set(requested.filter(id => validSpaces.has(id)))];
+        if (requested.length && !spaceIds.length) return sendJson(res, 400, { error: 'invalid_space' });
+        const token = 'cgm_' + crypto.randomBytes(24).toString('base64url');
+        const id = crypto.randomUUID();
+        db.prepare('INSERT INTO api_tokens (id, name, token_hash, roles, space_ids, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(id, name, tokenHash(token), JSON.stringify(roles), JSON.stringify(spaceIds), Date.now());
+        return sendJson(res, 201, { ...tokenRowDto(db.prepare('SELECT * FROM api_tokens WHERE id = ?').get(id)), token });
+      }
+    }
+    const tkm = pathname.match(/^\/api\/tokens\/([^/]+)$/);
+    if (tkm && req.method === 'DELETE') {
+      if (!principal.admin) return sendJson(res, 403, { error: 'admin_required' });
+      const row = db.prepare('SELECT id FROM api_tokens WHERE id = ?').get(tkm[1]);
+      if (!row) return sendJson(res, 404, { error: 'no_such_token' });
+      db.prepare('UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').run(Date.now(), tkm[1]);
+      return sendJson(res, 200, { ok: true });
+    }
 
     // 设置（全局）
-    if (pathname === '/api/settings' && req.method === 'GET') return sendJson(res, 200, toSettingsDto(settings));
+    if (pathname === '/api/settings' && req.method === 'GET') {
+      const dto = toSettingsDto(settings);
+      if (!principal.admin) {
+        dto.providers = dto.providers.filter(p => p.id === settings.activeProviderId);
+        dto.spaces = visibleSpaces(principal);
+      }
+      return sendJson(res, 200, dto);
+    }
     if (pathname === '/api/settings' && req.method === 'PUT') {
+      if (!principal.admin) return sendJson(res, 403, { error: 'admin_required' });
       const b = await readBody(req);
       // 只更新全局字段，providers 通过专用端点管理
       if (b.cloneBaseDir !== undefined) settings.cloneBaseDir = String(b.cloneBaseDir || '').trim() || CLONE_BASE_DIR_DEFAULT;
@@ -758,10 +813,11 @@ const server = http.createServer(async (req, res) => {
 
     // 空间（标签/分组）CRUD
     if (pathname === '/api/spaces' && req.method === 'GET') {
-      const sorted = [...settings.spaces].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      const sorted = [...visibleSpaces(principal)].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
       return sendJson(res, 200, sorted);
     }
     if (pathname === '/api/spaces' && req.method === 'POST') {
+      if (!principal.admin) return sendJson(res, 403, { error: 'admin_required' });
       const b = await readBody(req);
       const name = (b.name || '').trim();
       if (!name) return sendJson(res, 400, { error: 'missing name' });
@@ -773,6 +829,7 @@ const server = http.createServer(async (req, res) => {
     }
     const spm = pathname.match(/^\/api\/spaces\/([^/]+)$/);
     if (spm) {
+      if (!principal.admin) return sendJson(res, 403, { error: 'admin_required' });
       const space = settings.spaces.find(s => s.id === spm[1]);
       if (!space) return sendJson(res, 404, { error: 'no_such_space' });
       if (req.method === 'PUT') {
@@ -787,6 +844,16 @@ const server = http.createServer(async (req, res) => {
         // 解除所有仓库对该空间的绑定
         for (const r of repos) r.spaceIds = (r.spaceIds || []).filter(id => id !== space.id);
         settings.spaces = settings.spaces.filter(s => s.id !== space.id);
+        // 从访问令牌的空间范围中移除已删空间
+        try {
+          const rows = db.prepare('SELECT id, space_ids FROM api_tokens WHERE revoked_at IS NULL').all();
+          const upd = db.prepare('UPDATE api_tokens SET space_ids = ? WHERE id = ?');
+          for (const t of rows) {
+            const ids = jsonArray(t.space_ids);
+            const next = ids.filter(id => id !== space.id);
+            if (next.length !== ids.length) upd.run(JSON.stringify(next), t.id);
+          }
+        } catch {}
         await saveRepos(); await saveSettings();
         return sendJson(res, 200, { ok: true });
       }
@@ -794,6 +861,7 @@ const server = http.createServer(async (req, res) => {
     // 空间 ↔ 仓库绑定
     const spbind = pathname.match(/^\/api\/spaces\/([^/]+)\/repos$/);
     if (spbind && req.method === 'POST') {
+      if (!principal.admin) return sendJson(res, 403, { error: 'admin_required' });
       const space = settings.spaces.find(s => s.id === spbind[1]);
       if (!space) return sendJson(res, 404, { error: 'no_such_space' });
       const b = await readBody(req);
@@ -806,6 +874,7 @@ const server = http.createServer(async (req, res) => {
     }
     const spunbind = pathname.match(/^\/api\/spaces\/([^/]+)\/repos\/([^/]+)$/);
     if (spunbind && req.method === 'DELETE') {
+      if (!principal.admin) return sendJson(res, 403, { error: 'admin_required' });
       const repo = repos.find(r => r.id === spunbind[2]);
       if (!repo) return sendJson(res, 404, { error: 'no_such_repo' });
       repo.spaceIds = (repo.spaceIds || []).filter(id => id !== spunbind[1]);
@@ -815,11 +884,13 @@ const server = http.createServer(async (req, res) => {
 
     // 提供商 CRUD
     if (pathname === '/api/providers' && req.method === 'GET') {
-      // 返回提供商列表（隐藏 token）
-      const list = settings.providers.map(p => ({ ...p, token: p.token ? '***' : '' }));
+      // 返回提供商列表（隐藏 token）；非 admin 只能看到当前激活提供商
+      let list = settings.providers.map(p => ({ ...p, token: p.token ? '***' : '' }));
+      if (!principal.admin) list = list.filter(p => p.id === settings.activeProviderId);
       return sendJson(res, 200, list);
     }
     if (pathname === '/api/providers' && req.method === 'POST') {
+      if (!principal.admin) return sendJson(res, 403, { error: 'admin_required' });
       const b = await readBody(req);
       if (!b.type || !['gitlab','gitee','github'].includes(b.type)) return sendJson(res, 400, { error: 'invalid provider type' });
       const provider = {
@@ -836,6 +907,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 201, { ...provider, token: provider.token ? '***' : '' });
     }
     if (pathname.match(/^\/api\/providers\/[^/]+$/) && req.method === 'PUT') {
+      if (!principal.admin) return sendJson(res, 403, { error: 'admin_required' });
       const id = pathname.split('/')[3];
       const provider = getProviderById(id);
       if (!provider) return sendJson(res, 404, { error: 'provider not found' });
@@ -848,6 +920,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ...provider, token: provider.token ? '***' : '' });
     }
     if (pathname.match(/^\/api\/providers\/[^/]+$/) && req.method === 'DELETE') {
+      if (!principal.admin) return sendJson(res, 403, { error: 'admin_required' });
       const id = pathname.split('/')[3];
       const i = settings.providers.findIndex(p => p.id === id);
       if (i < 0) return sendJson(res, 404, { error: 'provider not found' });
@@ -859,6 +932,7 @@ const server = http.createServer(async (req, res) => {
 
     // 提供商：测试连接
     if (pathname === '/api/providers/check' && req.method === 'POST') {
+      if (!principal.admin) return sendJson(res, 403, { error: 'admin_required' });
       const b = await readBody(req);
       const provider = { type: b.type, url: b.url || '', token: b.token || '' };
       if (!provider.type) return sendJson(res, 400, { error: 'missing provider type' });
@@ -870,6 +944,7 @@ const server = http.createServer(async (req, res) => {
 
     // 提供商：搜索项目（支持搜索全部）
     if (pathname === '/api/providers/projects' && req.method === 'GET') {
+      if (!principal.admin) return sendJson(res, 403, { error: 'admin_required' });
       try {
         const providerId = query.providerId;
         let projects = [];
@@ -893,8 +968,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     // 仓库注册表
-    if (pathname === '/api/repos' && req.method === 'GET') return sendJson(res, 200, repos);
+    if (pathname === '/api/repos' && req.method === 'GET') return sendJson(res, 200, principal.spaceIds ? repos.filter(r => repoVisible(principal, r)) : repos);
     if (pathname === '/api/repos' && req.method === 'POST') {
+      if (!principal.admin) return sendJson(res, 403, { error: 'admin_required' });
       const b = await readBody(req);
       const spaceIds = Array.isArray(b.spaceIds) ? b.spaceIds : (b.spaceId ? [b.spaceId] : []);
       // 去重：同 gitUrl 且已存在 → 仅追加空间绑定关系，不重复注册
@@ -916,6 +992,7 @@ const server = http.createServer(async (req, res) => {
     if (wm) {
       const repo = findRepo(wm[1]);
       if (!repo) return sendJson(res, 404, { error: 'no_such_repo' });
+      if (!repoVisible(principal, repo)) return sendJson(res, 403, { error: 'out_of_scope' });
       if (req.method === 'GET') return sendJson(res, 200, repo.worktrees || []);
       if (req.method === 'POST') {
         const b = await readBody(req);
@@ -945,6 +1022,7 @@ const server = http.createServer(async (req, res) => {
 
     // 添加本地仓库
         if (pathname === '/api/repos/local' && req.method === 'POST') {
+          if (!principal.admin) return sendJson(res, 403, { error: 'admin_required' });
           const b = await readBody(req);
           const localPath = (b.path || '').trim();
           if (!localPath) return sendJson(res, 400, { error: 'missing path' });
@@ -985,6 +1063,7 @@ const server = http.createServer(async (req, res) => {
 
         // 浏览服务器目录
         if (pathname === '/api/browse' && req.method === 'GET') {
+          if (!principal.admin) return sendJson(res, 403, { error: 'admin_required' });
           const browsePath = (query.path || '').trim() || '/';
           try {
             const entries = await fs.readdir(browsePath, { withFileTypes: true });
@@ -1017,6 +1096,7 @@ const server = http.createServer(async (req, res) => {
     if (m) {
       const repo = findRepo(m[1]);
       if (!repo) return sendJson(res, 404, { error: 'no_such_repo' });
+      if (!repoVisible(principal, repo)) return sendJson(res, 403, { error: 'out_of_scope' });
       const action = m[2];
       res.writeHead(200, { 'content-type': 'application/json' });
       res.write(JSON.stringify({ ok: true, msg: 'started' }));

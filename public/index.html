@@ -241,7 +241,7 @@ tailwind.config = {
         </div>
       </div>
 
-      <div class="bg-surface border border-white/[0.04] rounded-md p-6 mb-3">
+      <div id="addRepoPanel" class="bg-surface border border-white/[0.04] rounded-md p-6 mb-3">
         <div class="flex items-center justify-between mb-5">
           <div class="text-[14px] font-semibold tracking-[-0.01em]">Add Repository</div>
         </div>
@@ -348,6 +348,12 @@ tailwind.config = {
           <pre id="mcpSnippet" class="bg-surface-elevated border border-white/[0.04] p-4 text-[12px] leading-[1.6] text-text-secondary overflow-x-auto font-mono"></pre>
         </div>
         <p id="mcpAuthNote" class="text-[12px] text-text-tertiary mt-3"></p>
+      </div>
+
+      <div class="flex items-center justify-between gap-4 border-b border-white/[0.04] pb-2 mt-6 mb-3"><b class="text-[13px] font-semibold tracking-[-0.01em]">Access tokens</b><button onclick="openTokenCreate()" class="inline-flex items-center gap-2 h-7 px-3 rounded-sm font-medium text-[12px] text-text-secondary bg-surface-elevated border border-white/[0.04] hover:text-text-primary hover:border-white/[0.07] hover:bg-surface-hover cursor-pointer transition-colors whitespace-nowrap">＋ New token</button></div>
+      <div class="bg-surface border border-white/[0.04] rounded-md p-6">
+        <div id="tokenList" class="flex flex-col gap-2"></div>
+        <div id="tokenEmpty" class="hidden text-[12px] text-text-tertiary">No additional tokens. Create one to give a teammate scoped access.</div>
       </div>
     </div>
 
@@ -521,6 +527,49 @@ tailwind.config = {
   </div>
 </div>
 
+<!-- Create access token -->
+<div id="tokenCreateOverlay" onclick="if(event.target===this)closeTokenCreate()"
+  class="fixed inset-0 z-[100] hidden [&.show]:flex items-center justify-center animate-fadeIn">
+  <div class="bg-surface border border-white/[0.07] rounded-lg p-8 w-full max-w-[520px] max-h-[85vh] overflow-y-auto shadow-modal">
+    <div id="tokenCreateForm">
+      <div class="text-[16px] font-semibold mb-2 tracking-[-0.01em]">New access token</div>
+      <p class="text-[12px] text-text-tertiary mb-5">Shown once. Pick the roles and spaces this token can access.</p>
+      <div class="flex flex-col gap-2 mb-5">
+        <label class="text-[12px] font-medium text-text-secondary">Name</label>
+        <input id="tokenName" placeholder="e.g. Cursor · Platform" onkeydown="if(event.key==='Enter')createToken()"
+          class="form-input h-9 px-3 bg-surface-elevated border border-white/[0.04] rounded-sm text-text-primary text-[14px] outline-none focus:border-accent placeholder:text-text-quaternary transition-colors">
+      </div>
+      <div class="mb-5">
+        <div class="text-[12px] font-medium text-text-secondary mb-2">Roles</div>
+        <label class="flex items-center gap-3 px-3 py-2 border border-white/[0.04] rounded-sm text-[13px] cursor-pointer hover:bg-surface-hover transition-colors"><input id="tokenRoleWeb" type="checkbox" checked class="w-4 h-4 accent-white"><span>Web UI</span></label>
+        <label class="flex items-center gap-3 px-3 py-2 mt-2 border border-white/[0.04] rounded-sm text-[13px] cursor-pointer hover:bg-surface-hover transition-colors"><input id="tokenRoleMcp" type="checkbox" class="w-4 h-4 accent-white"><span>MCP</span></label>
+      </div>
+      <div class="mb-5">
+        <div class="flex items-center justify-between mb-2"><div class="text-[12px] font-medium text-text-secondary">Spaces</div><span class="text-[11px] text-text-tertiary">Unchecked = all spaces</span></div>
+        <div id="tokenSpaces" class="flex flex-col gap-2"></div>
+      </div>
+      <div id="tokenCreateState" class="text-[11px] text-text-tertiary mb-2"></div>
+      <div class="flex gap-2 justify-end mt-6">
+        <button onclick="closeTokenCreate()"
+          class="inline-flex items-center gap-2 h-8 px-4 rounded-sm font-medium text-[13px] text-text-secondary bg-surface-elevated border border-white/[0.04] hover:text-text-primary hover:border-white/[0.07] hover:bg-surface-hover cursor-pointer transition-colors">Cancel</button>
+        <button onclick="createToken()"
+          class="inline-flex items-center gap-2 h-8 px-4 rounded-sm font-medium text-[13px] text-black bg-accent hover:bg-accent-hover cursor-pointer border-0 transition-colors">Create token</button>
+      </div>
+    </div>
+    <div id="tokenReveal" class="hidden">
+      <div class="text-[16px] font-semibold mb-2 tracking-[-0.01em]">Token created</div>
+      <p class="text-[12px] text-text-tertiary mb-4">Copy it now — it will not be shown again.</p>
+      <pre id="tokenValue" class="bg-surface-elevated border border-white/[0.04] p-4 text-[12px] leading-[1.6] text-text-secondary overflow-x-auto font-mono"></pre>
+      <div class="flex gap-2 justify-end mt-5">
+        <button onclick="copyTokenValue()"
+          class="inline-flex items-center gap-2 h-8 px-4 rounded-sm font-medium text-[13px] text-text-secondary bg-surface-elevated border border-white/[0.04] hover:text-text-primary hover:border-white/[0.07] hover:bg-surface-hover cursor-pointer transition-colors">Copy token</button>
+        <button onclick="closeTokenCreate()"
+          class="inline-flex items-center gap-2 h-8 px-4 rounded-sm font-medium text-[13px] text-black bg-accent hover:bg-accent-hover cursor-pointer border-0 transition-colors">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Toast + Message Popover -->
 <div id="toast" class="toast fixed top-5 right-5 z-[200] px-5 py-3 rounded-md font-medium text-[13px] tracking-[0.01em] bg-surface border border-white/[0.07] shadow-toast"></div>
 <div id="msgPopover" class="hidden fixed z-[100] bg-surface border border-white/[0.07] rounded-md p-4 text-[13px] text-text-secondary max-w-[480px] max-h-[300px] overflow-y-auto whitespace-pre-wrap break-words shadow-popover"></div>
@@ -528,15 +577,27 @@ tailwind.config = {
 <script>
 /* ============ SAME JS — ALL UNCHANGED (Tailwind handles the classes via [&.xxx] arbitrary variants) ============ */
 const $=id=>document.getElementById(id);
-let S={},providers=[],repos=[],spaces=[{id:'all',name:'All',builtin:true}],currentSpace='all',selectedSet=new Set(),results=[];
+let S={},providers=[],repos=[],spaces=[{id:'all',name:'All',builtin:true}],currentSpace='all',selectedSet=new Set(),results=[],ME=null;
 const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 function toast(msg,type=''){const t=$('toast');t.textContent=msg;t.className='toast fixed top-5 right-5 z-[200] px-5 py-3 rounded-md font-medium text-[13px] tracking-[0.01em] bg-surface border border-white/[0.07] shadow-toast show'+(type?' '+type:'');clearTimeout(t._t);t._t=setTimeout(()=>t.className='toast fixed top-5 right-5 z-[200] px-5 py-3 rounded-md font-medium text-[13px] tracking-[0.01em] bg-surface border border-white/[0.07] shadow-toast',3000);}
 let TOKEN=localStorage.getItem('cgm_token')||'';
 const authHeaders=()=>TOKEN?{'Authorization':'Bearer '+TOKEN}:{};
-async function api(p,o={}){const r=await fetch(p.replace(/^\//,''),{...o,headers:{'content-type':'application/json',...authHeaders(),...(o.headers||{})}});if(r.status===401){promptToken('Access denied (401). The web UI requires the ADMIN_TOKEN; the MCP token only works for /mcp.');throw new Error('unauthorized');}return r.json();}
+async function api(p,o={}){const r=await fetch(p.replace(/^\//,''),{...o,headers:{'content-type':'application/json',...authHeaders(),...(o.headers||{})}});if(r.status===401){let j={};try{j=await r.json()}catch{};promptToken(j.error==='web_role_required'?'This token is MCP-only. Enter the ADMIN_TOKEN or a web-access token for the UI.':'Access denied (401). Enter the ADMIN_TOKEN or a web-access token.');throw new Error('unauthorized');}if(r.status===403){let j={};try{j=await r.json()}catch{};toast(j.error==='admin_required'?'Admin token required':j.error==='out_of_scope'?'Outside your allowed spaces':'Not allowed','error');throw new Error('forbidden');}return r.json();}
 function promptToken(msg){if(msg)$('tokenHint').textContent=msg;$('tokenOverlay').classList.add('show');setTimeout(()=>$('tokenInput').focus(),0);}
-async function saveTokenInput(){const v=$('tokenInput').value.trim();if(!v){toast('Please enter a token','error');return;}TOKEN=v;localStorage.setItem('cgm_token',v);$('tokenOverlay').classList.remove('show');toast('Token saved, reloading','success');try{await loadSettings();await loadRepos();}catch{}}
+async function saveTokenInput(){const v=$('tokenInput').value.trim();if(!v){toast('Please enter a token','error');return;}TOKEN=v;localStorage.setItem('cgm_token',v);$('tokenOverlay').classList.remove('show');try{await loadMe();await loadSettings();await loadRepos();connectSse();if(isAdmin())await loadTokens();toast('Token accepted','success');}catch{}}
 function clearSavedToken(){TOKEN='';localStorage.removeItem('cgm_token');$('tokenInput').value='';toast('Local token cleared');}
+async function loadMe(){ME=await api('/api/auth/me');applyPermissions();return ME;}
+const isAdmin=()=>!!(ME&&ME.admin);
+const canUseMcp=()=>!!(ME&&(ME.admin||ME.roles.includes('mcp')));
+function applyPermissions(){
+  const admin=isAdmin();
+  const navSettings=document.querySelector('.nav-pill[data-view="settings"]');
+  if(navSettings)navSettings.style.display=admin?'':'none';
+  const addPanel=$('addRepoPanel');
+  if(addPanel)addPanel.style.display=admin?'':'none';
+  if(!admin&&document.getElementById('view-settings')?.classList.contains('active'))switchView('overview');
+  if(repos.length||spaces.length){try{renderSpaces();renderRepos();renderStats();}catch{}}
+}
 window.addEventListener('unhandledrejection',e=>{if(e&&e.reason&&e.reason.message==='unauthorized')e.preventDefault();});
 const STATUS={registered:['','Registered'],cloning:['cloning','Cloning'],cloned:['cloned','Cloned'],indexing:['indexing','Indexing'],indexed:['indexed','Indexed'],removing:['removing','Removing'],failed:['failed','Failed'],pull_failed:['failed','Pull Failed']};
 const PROVIDER_LABELS={gitlab:'GitLab',gitee:'Gitee',github:'GitHub'};
@@ -622,15 +683,15 @@ async function addSelected(){const items=[...selectedSet].map(i=>results[i]);if(
 
 /* Space menu — .show / .active 由 Tailwind [&.active]:accent 响应 */
 async function loadSpaces(){spaces=await api('/api/spaces');renderSpaces();}
-function switchView(view){document.querySelectorAll('.nav-pill').forEach(x=>x.classList.toggle('active',x.dataset.view===view));document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active',v.id==='view-'+view));}
+function switchView(view){if(view==='settings'&&!isAdmin())view='overview';document.querySelectorAll('.nav-pill').forEach(x=>x.classList.toggle('active',x.dataset.view===view));document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active',v.id==='view-'+view));if(view==='settings'&&isAdmin())loadTokens().catch(()=>{});}
 function renderSpaces(){const menu=$('spaceMenu');if(!menu)return;const sorted=[...spaces].sort((a,b)=>(a.order??0)-(b.order??0));const cur=spaces.find(s=>s.id===currentSpace)||{};
   $('spaceTriggerLabel').textContent=cur.builtin?'All spaces':(cur.name||'All spaces');
   menu.innerHTML='<div class="px-3 pt-1 pb-2 text-[10px] text-text-quaternary tracking-[0.08em] uppercase">Filter by space</div>'+sorted.map(s=>`<div class="[&.active]:text-accent flex items-center gap-3 px-3 py-2 rounded-sm cursor-pointer text-[13px] text-text-secondary hover:bg-surface-hover hover:text-text-primary transition-colors ${currentSpace===s.id?'active':''}" onclick="onSpaceSelect('${s.id}')">
       <span class="name flex-1 overflow-hidden text-ellipsis whitespace-nowrap">${s.builtin?'All':esc(s.name)}</span>
-      ${s.builtin?'':`<span class="del opacity-0 text-text-quaternary text-[14px] leading-none px-1 rounded-xs transition-all hover:opacity-100 hover:text-error hover:bg-error-dim">×</span>`}
+      ${s.builtin?'':(isAdmin()?`<span class="del opacity-0 text-text-quaternary text-[14px] leading-none px-1 rounded-xs transition-all hover:opacity-100 hover:text-error hover:bg-error-dim" onclick="event.stopPropagation();delSpace('${s.id}')">×</span>`:'')}
     </div>`).join('')
-    + `<div class="flex items-center gap-2 px-3 py-3 border-t border-white/[0.04] mt-0.5 text-accent font-medium text-[13px] cursor-pointer rounded-sm hover:bg-accent-dim transition-colors" onclick="openNewSpaceDialog()">
-         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>New Space</div>`;}
+    + (isAdmin()?`<div class="flex items-center gap-2 px-3 py-3 border-t border-white/[0.04] mt-0.5 text-accent font-medium text-[13px] cursor-pointer rounded-sm hover:bg-accent-dim transition-colors" onclick="openNewSpaceDialog()">
+         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>New Space</div>`:'');}
 function toggleSpaceMenu(){const m=$('spaceMenu');m.style.display=m.style.display==='none'?'block':'none';}
 document.addEventListener('click',e=>{const w=e.target.closest('.space-select');if(!w)$('spaceMenu').style.display='none';});
 async function onSpaceSelect(id){currentSpace=id;renderSpaces();$('spaceMenu').style.display='none';switchView('repos');await loadRepos();}
@@ -687,21 +748,23 @@ function renderStats(){
   renderOverviewRows(list);
 }
 function renderOverviewAlert(list,c){
-  const band=$('healthAlert'),lead=list.find(repoBad),busy=list.find(repoBusy);
+  const band=$('healthAlert'),lead=list.find(repoBad),busy=list.find(repoBusy),admin=isAdmin();
   const set=(state,label,count,title,detail,actions)=>{band.dataset.state=state;$('alertLabel').textContent=label;$('alertCount').textContent=count==null?'':String(count);$('alertTitle').textContent=title;$('alertDetail').textContent=detail;$('alertActions').innerHTML=actions;};
   if(lead){
     const auth=/401|403|auth|token|credential|permission/i.test(lead.message||'');
     const op=lead.status==='pull_failed'?'sync':(lead.localPath?'analyze':'clone');
     const reason=shortText(lead.message||repoLabel(lead),150);
-    set('bad','NEEDS ACTION',c.failed,`${lead.name} ${repoLabel(lead).toLowerCase()}`,`${reason}${auth?' · check the source credentials, then retry':''}`,auth
+    set('bad','NEEDS ACTION',c.failed,`${lead.name} ${repoLabel(lead).toLowerCase()}`,`${reason}${auth?(admin?' · check the source credentials, then retry':' · ask an administrator to fix source credentials'):''}`,auth&&admin
       ?`<button class="btn-pill primary" onclick="switchView('settings')">Check credentials</button><button class="btn-pill" onclick="doOp('${lead.id}','${op}')">Retry</button>`
       :`<button class="btn-pill primary" onclick="doOp('${lead.id}','${op}')">Retry</button><button class="btn-pill" onclick="switchView('repos')">Open repository</button>`);
   }else if(busy){
     set('warn','PROCESSING',c.processing,`${busy.name} is ${repoLabel(busy).toLowerCase()}`,shortText(busy.message||'Index is catching up.',150),`<button class="btn-pill primary" onclick="switchView('repos')">View progress</button>`);
   }else if(!c.total){
-    set('ok','NOT CONNECTED','','No repositories yet','Add a provider, then connect a repository to build an index.',`<button class="btn-pill primary" onclick="switchView('settings')">Add provider</button>`);
+    set('ok','NOT CONNECTED','',admin?'No repositories yet':'No repositories in your spaces',admin?'Add a provider, then connect a repository to build an index.':'Ask an administrator to add or bind repositories for your spaces.',admin?`<button class="btn-pill primary" onclick="switchView('settings')">Add provider</button>`:`<button class="btn-pill primary" onclick="switchView('repos')">Open repositories</button>`);
+  }else if(c.indexed<c.total){
+    set('warn','UNINDEXED',c.total-c.indexed,`${c.total-c.indexed} repositories are not indexed`,'Clone or analyze them before relying on search.',`<button class="btn-pill primary" onclick="switchView('repos')">Review repositories</button>`);
   }else{
-    set('ok','ALL CLEAR','','Everything is indexed',`${c.indexed} repositories ready for MCP search.`,`<button class="btn-pill primary" onclick="switchView('repos')">＋ Add repository</button>`);
+    set('ok','ALL CLEAR','','Everything is indexed',`${c.indexed} repositories ready for MCP search.`,`<button class="btn-pill primary" onclick="switchView('repos')">${admin?'＋ Add repository':'Open repositories'}</button>`);
   }
 }
 function renderOverviewRows(list){
@@ -715,6 +778,7 @@ function renderOverviewRows(list){
     const action=repoBad(r)?`<button class="sig-action" onclick="doOp('${r.id}','${op}')">Retry</button>`
       :repoBusy(r)?'<button class="sig-action" disabled>Working</button>'
       :r.status==='cloned'?`<button class="sig-action" onclick="doOp('${r.id}','analyze')">Analyze</button>`
+      :r.status==='registered'?`<button class="sig-action" onclick="doOp('${r.id}','clone')">Clone</button>`
       :`<button class="sig-action" onclick="doOp('${r.id}','sync')">Sync</button>`;
     return `<div class="sig-row"><div class="sig-repo"><b>${esc(r.name)}</b><small>${esc(PROVIDER_LABELS[r.providerType]||r.providerType||'local')} · ${esc(r.branch||'—')}${spaceNames(r).length?' · '+spaceInline(r):''}</small></div><span class="sig-status ${tone}">${esc(repoLabel(r))}</span><span class="sig-path" title="${esc(r.localPath||'')}">${esc(shortPath(r.localPath))}</span><span class="sig-time">${timeAgo(r.addedAt)}</span>${action}</div>`;
   }).join('');
@@ -724,7 +788,7 @@ const shortPath=p=>{if(!p)return 'Not cloned';const base=(S&&S.cloneBaseDir)||''
 function renderRepos(){const tb=$('repoTbody');tb.innerHTML='';const list=currentSpace==='all'?repos:repos.filter(r=>(r.spaceIds||[]).includes(currentSpace));$('repoEmpty').style.display=repos.length?'none':'flex';$('repoCount').textContent=list.length?list.length+' repositories':'';
   list.forEach(r=>{const [cls]=STATUS[r.status]||['',''];const msg=r.message||'';const shortMsg=msg.length>60?msg.slice(0,60)+'...':msg;
     const multiSpace=currentSpace!=='all'&&(r.spaceIds||[]).length>1;
-    const removeBtn=multiSpace
+    const removeBtn=isAdmin()&&multiSpace
       ? `<button class="btn-ghost [&.active]:bg-surface inline-flex items-center gap-2 h-[26px] px-2 text-[11px] text-text-tertiary bg-transparent border-0 rounded-sm cursor-pointer hover:text-text-primary hover:bg-surface-hover transition-colors whitespace-nowrap flex-none" title="Unbind from this space (repo is kept)" onclick="doUnbind('${r.id}')">Unbind</button>`
       : `<button class="btn-danger inline-flex items-center gap-2 h-[26px] px-2 text-[11px] rounded-sm cursor-pointer border border-error/20 text-error hover:bg-error-dim hover:border-error/30 transition-colors whitespace-nowrap flex-none" onclick="doRemove('${r.id}')">Remove</button>`;
     const tr=document.createElement('tr');tr.innerHTML=
@@ -732,7 +796,7 @@ function renderRepos(){const tb=$('repoTbody');tb.innerHTML='';const list=curren
          <div class="repo-name font-medium tracking-[-0.005em] overflow-hidden text-ellipsis whitespace-nowrap">${esc(r.name)}</div>
          <div class="repo-url text-[12px] text-text-tertiary font-mono mt-0.5 overflow-hidden text-ellipsis whitespace-nowrap">${esc(r.gitUrl||'')}</div>
          ${msg?`<div class="repo-msg text-[12px] text-text-tertiary mt-0.5 max-w-[280px] whitespace-nowrap overflow-hidden text-ellipsis cursor-pointer relative" onclick="showMsg(this,${JSON.stringify(esc(msg)).replace(/"/g,'&quot;')})" title="Click to expand">${esc(shortMsg)}</div>`:''}
-         <div class="repo-tags">${spaceNames(r).map(n=>`<span>#${esc(n)}</span>`).join('')}<button class="space-edit" onclick="openSpaceDialog('${r.id}')">+ Spaces</button></div>
+         <div class="repo-tags">${spaceNames(r).map(n=>`<span>#${esc(n)}</span>`).join('')}${isAdmin()?`<button class="space-edit" onclick="openSpaceDialog('${r.id}')">+ Spaces</button>`:''}</div>
        </td>
        <td class="px-5 py-3 border-b border-white/[0.04] align-middle">
          <div class="repo-path text-[12px] text-text-secondary font-mono overflow-hidden text-ellipsis whitespace-nowrap" title="${esc(r.localPath||'')}">${esc(shortPath(r.localPath))}</div>
@@ -788,16 +852,19 @@ async function copyText(text){try{await navigator.clipboard.writeText(text);retu
 function selectText(el){if(!el)return;const r=document.createRange();r.selectNodeContents(el);const s=getSelection();s.removeAllRanges();s.addRange(r);}
 async function copyMcpUrl(){const ok=await copyText(mcpEndpointUrl());if(!ok)selectText($('mcpEndpoint'));toast(ok?'MCP endpoint copied':'Copy failed — text selected, press Ctrl+C',ok?'success':'error');}
 async function copyMcpConfig(){const ok=await copyText(mcpConfig());if(!ok)selectText($('mcpSnippet'));toast(ok?'MCP client config copied':'Copy failed — text selected, press Ctrl+C',ok?'success':'error');}
+async function loadTokens(){if(!isAdmin())return;try{renderTokens(await api('/api/tokens'));}catch(e){}}
+function renderTokens(list){const el=$('tokenList');if(!el)return;const active=list.filter(t=>!t.revokedAt);$('tokenEmpty').classList.toggle('hidden',active.length>0);el.innerHTML=active.map(t=>{const roles=t.roles.map(r=>r==='web'?'Web UI':'MCP').join(' + ');const scope=t.spaceIds.length?t.spaceIds.map(id=>spaces.find(s=>s.id===id)?.name||id).join(', '):'All spaces';const created=new Date(t.createdAt).toLocaleDateString();const last=t.lastUsedAt?timeAgo(t.lastUsedAt):'never used';return `<div class="flex items-center gap-4 px-4 py-3 border border-white/[0.04] rounded-sm"><div class="min-w-0 flex-1"><div class="text-[13px] font-medium text-text-primary">${esc(t.name)}</div><div class="mt-1 text-[11px] text-text-tertiary font-mono overflow-hidden text-ellipsis whitespace-nowrap">${esc(roles)} · ${esc(scope)} · created ${esc(created)} · ${esc(last)}</div></div><button class="inline-flex items-center h-[26px] px-2 text-[11px] rounded-sm cursor-pointer border border-error/20 text-error hover:bg-error-dim hover:border-error/30 transition-colors whitespace-nowrap flex-none" onclick="revokeToken('${t.id}')">Revoke</button></div>`;}).join('')}
+function openTokenCreate(){if(!isAdmin())return;$('tokenName').value='';$('tokenRoleWeb').checked=true;$('tokenRoleMcp').checked=false;$('tokenCreateState').textContent='';$('tokenCreateForm').classList.remove('hidden');$('tokenReveal').classList.add('hidden');const list=spaces.filter(s=>!s.builtin);$('tokenSpaces').innerHTML=list.length?list.map(s=>`<label class="flex items-center gap-3 px-3 py-2 border border-white/[0.04] rounded-sm text-[13px] cursor-pointer hover:bg-surface-hover transition-colors"><input type="checkbox" value="${s.id}" class="w-4 h-4 accent-white"><span>${esc(s.name)}</span></label>`).join(''):'<div class="text-[12px] text-text-tertiary">No custom spaces yet. The token will access all spaces.</div>';$('tokenCreateOverlay').classList.add('show');setTimeout(()=>$('tokenName').focus(),0)}
+function closeTokenCreate(){$('tokenCreateOverlay').classList.remove('show')}
+async function createToken(){const name=$('tokenName').value.trim(),roles=[];if($('tokenRoleWeb').checked)roles.push('web');if($('tokenRoleMcp').checked)roles.push('mcp');const spaceIds=[...$('tokenSpaces').querySelectorAll('input:checked')].map(i=>i.value);if(!name){$('tokenCreateState').textContent='Enter a name.';return}if(!roles.length){$('tokenCreateState').textContent='Pick at least one role.';return}try{const r=await api('/api/tokens',{method:'POST',body:JSON.stringify({name,roles,spaceIds})});if(!r.token){$('tokenCreateState').textContent=r.error||'Failed to create token';return}$('tokenValue').textContent=r.token;$('tokenCreateForm').classList.add('hidden');$('tokenReveal').classList.remove('hidden');await loadTokens()}catch(e){}}
+async function copyTokenValue(){const ok=await copyText($('tokenValue').textContent);toast(ok?'Token copied':'Copy failed — select the token','success')}
+async function revokeToken(id){if(!confirm('Revoke this token? Clients using it lose access immediately.'))return;try{await api('/api/tokens/'+id,{method:'DELETE'});toast('Token revoked','success');await loadTokens()}catch(e){}}
 fillMcp();
-loadSettings().catch(()=>{});loadRepos().catch(()=>{});
-
-/* SSE */
-let connLive=false;
-const es=new EventSource(TOKEN?'mcp?token='+encodeURIComponent(TOKEN):'mcp');
-es.addEventListener('repos-changed',()=>loadRepos());
-es.onopen=()=>{connLive=true;};
-es.onerror=()=>{connLive=false;};
-setInterval(loadRepos,30000);
+let connLive=false,sse=null;
+function connectSse(){if(sse||!canUseMcp())return;sse=new EventSource(TOKEN?'mcp?token='+encodeURIComponent(TOKEN):'mcp');sse.addEventListener('repos-changed',()=>loadRepos());sse.onopen=()=>{connLive=true;};sse.onerror=()=>{connLive=false;};}
+async function boot(){try{await loadMe();await loadSettings();await loadRepos();if(isAdmin())await loadTokens();connectSse();}catch(e){}}
+boot();
+setInterval(()=>{if(ME)loadRepos();},30000);
 
 /* Message popover */
 function showMsg(el,msg){const popover=$('msgPopover');if(popover.classList.contains('show')&&popover._target===el){popover.classList.remove('show');return;}popover.textContent=msg;popover._target=el;const rect=el.getBoundingClientRect();popover.style.left=Math.min(rect.left,window.innerWidth-500)+'px';popover.style.top=(rect.bottom+8)+'px';popover.classList.add('show');}

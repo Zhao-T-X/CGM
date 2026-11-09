@@ -37,6 +37,7 @@ The whole pipeline — clone → index → AI retrieval — runs automatically. 
 
 **Security**
 - Route-level auth — `/api/*` and `/mcp*` guarded by `ADMIN_TOKEN` / `MCP_TOKEN`, constant-time comparison
+- Role-based access tokens — Settings → Access tokens creates `web` / `mcp` tokens; web tokens only see/operate repositories in their spaces, mcp tokens only search their spaces, admin is unrestricted
 - Loopback exemption — local access allowed by default (with same-origin checks so web pages can't hit your localhost); fail-closed when exposed: refuses to start without a token
 - Auto-generated 192-bit token on first start, persisted to `auth.json` — safe to expose without any manual setup
 - Token protection, three layers — AES-256-GCM at rest, masked in API responses (dots + last 4), masked PUT values never overwrite real tokens
@@ -158,6 +159,7 @@ Branch-scoped query example:
 | `/api/repos/:id/{clone,analyze,status,remove,sync}` | POST | Per-repo ops (async; same-repo ops are automatically serialized) |
 | `/api/repos/:id/worktree/:branch` | POST/DELETE | Create / remove a branch worktree |
 | `/api/spaces[/...]` | GET/POST/PUT/DELETE | Space management / repo binding |
+| `/api/tokens[/...]` | GET/POST/DELETE | Access-token management (admin): roles + space scopes |
 | `/api/browse?path=` | GET | Server-side directory browser (for adding local repos) |
 | `/mcp` · `/mcp/message` | POST/GET | MCP endpoint (Streamable HTTP + SSE) |
 
