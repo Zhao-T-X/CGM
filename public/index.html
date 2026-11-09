@@ -449,7 +449,7 @@ tailwind.config = {
       <label class="text-[12px] font-medium text-text-secondary tracking-[0.02em]">Access Token</label>
       <input id="tokenInput" type="password" placeholder="ADMIN_TOKEN / MCP_TOKEN" onkeydown="if(event.key==='Enter')saveTokenInput()"
         class="form-input h-9 px-3 bg-surface-elevated border border-white/[0.04] rounded-sm text-text-primary text-[14px] outline-none focus:border-accent focus:shadow-[0_0_0_3px_rgba(94,106,210,0.12)] placeholder:text-text-quaternary transition-colors">
-      <div id="tokenHint" class="text-[11px] text-text-tertiary">This server has authentication enabled. Enter the access token (stored only in this browser's localStorage).</div>
+      <div id="tokenHint" class="text-[11px] text-text-tertiary">This server has authentication enabled. Enter the <b>ADMIN_TOKEN</b> (stored only in this browser's localStorage). The MCP token is only valid for <code>/mcp</code>.</div>
     </div>
     <div class="flex gap-2 justify-end mt-6">
       <button onclick="clearSavedToken()"
@@ -533,7 +533,7 @@ const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&g
 function toast(msg,type=''){const t=$('toast');t.textContent=msg;t.className='toast fixed top-5 right-5 z-[200] px-5 py-3 rounded-md font-medium text-[13px] tracking-[0.01em] bg-surface border border-white/[0.07] shadow-toast show'+(type?' '+type:'');clearTimeout(t._t);t._t=setTimeout(()=>t.className='toast fixed top-5 right-5 z-[200] px-5 py-3 rounded-md font-medium text-[13px] tracking-[0.01em] bg-surface border border-white/[0.07] shadow-toast',3000);}
 let TOKEN=localStorage.getItem('cgm_token')||'';
 const authHeaders=()=>TOKEN?{'Authorization':'Bearer '+TOKEN}:{};
-async function api(p,o={}){const r=await fetch(p.replace(/^\//,''),{...o,headers:{'content-type':'application/json',...authHeaders(),...(o.headers||{})}});if(r.status===401){promptToken('Access denied (401): token missing or incorrect. Enter the ADMIN_TOKEN / MCP_TOKEN configured on the server.');throw new Error('unauthorized');}return r.json();}
+async function api(p,o={}){const r=await fetch(p.replace(/^\//,''),{...o,headers:{'content-type':'application/json',...authHeaders(),...(o.headers||{})}});if(r.status===401){promptToken('Access denied (401). The web UI requires the ADMIN_TOKEN; the MCP token only works for /mcp.');throw new Error('unauthorized');}return r.json();}
 function promptToken(msg){if(msg)$('tokenHint').textContent=msg;$('tokenOverlay').classList.add('show');setTimeout(()=>$('tokenInput').focus(),0);}
 async function saveTokenInput(){const v=$('tokenInput').value.trim();if(!v){toast('Please enter a token','error');return;}TOKEN=v;localStorage.setItem('cgm_token',v);$('tokenOverlay').classList.remove('show');toast('Token saved, reloading','success');try{await loadSettings();await loadRepos();}catch{}}
 function clearSavedToken(){TOKEN='';localStorage.removeItem('cgm_token');$('tokenInput').value='';toast('Local token cleared');}
