@@ -328,6 +328,27 @@ tailwind.config = {
           class="inline-flex items-center gap-2 h-8 px-4 rounded-sm font-medium text-[13px] text-text-secondary bg-surface-elevated border border-white/[0.04] hover:text-text-primary hover:border-white/[0.07] hover:bg-surface-hover cursor-pointer transition-colors">Save</button>
       </div>
       </div>
+
+      <div class="flex items-center justify-between gap-4 border-b border-white/[0.04] pb-2 mt-6 mb-3"><b class="text-[13px] font-semibold tracking-[-0.01em]">MCP access</b><span class="font-mono text-[10px] uppercase tracking-[0.08em] text-text-tertiary">Streamable HTTP / JSON-RPC 2.0</span></div>
+      <div class="bg-surface border border-white/[0.04] rounded-md p-6">
+        <div class="flex items-start justify-between gap-4 flex-wrap">
+          <div class="min-w-0 flex-1">
+            <div class="text-[11px] text-text-tertiary uppercase tracking-[0.08em] mb-2">Endpoint</div>
+            <code id="mcpEndpoint" class="block text-[13px] font-mono text-text-secondary break-all"></code>
+          </div>
+          <button onclick="copyMcpUrl()"
+            class="inline-flex items-center gap-2 h-8 px-4 rounded-sm font-medium text-[13px] text-text-secondary bg-surface-elevated border border-white/[0.04] hover:text-text-primary hover:border-white/[0.07] hover:bg-surface-hover cursor-pointer transition-colors whitespace-nowrap">Copy URL</button>
+        </div>
+        <div class="mt-5">
+          <div class="flex items-center justify-between mb-2">
+            <div class="text-[11px] text-text-tertiary uppercase tracking-[0.08em]">Client config</div>
+            <button onclick="copyMcpConfig()"
+              class="inline-flex items-center gap-2 h-7 px-3 rounded-sm font-medium text-[12px] text-text-secondary bg-surface-elevated border border-white/[0.04] hover:text-text-primary hover:border-white/[0.07] hover:bg-surface-hover cursor-pointer transition-colors whitespace-nowrap">Copy config</button>
+          </div>
+          <pre id="mcpSnippet" class="bg-surface-elevated border border-white/[0.04] p-4 text-[12px] leading-[1.6] text-text-secondary overflow-x-auto font-mono"></pre>
+        </div>
+        <p id="mcpAuthNote" class="text-[12px] text-text-tertiary mt-3"></p>
+      </div>
     </div>
 
   </main>
@@ -759,6 +780,15 @@ async function doOp(id,op,btn){if(btn)btn.disabled=true;const r=repos.find(x=>x.
 async function doUnbind(id){const r=repos.find(x=>x.id===id);if(!r)return;if(!confirm('Unbind "'+r.name+'" from this space?\nThe repo, its clone and index are all kept.'))return;try{await api(`api/spaces/${currentSpace}/repos/${id}`,{method:'DELETE'});toast('Unbound from space','success');}catch(e){if(e.message!=='unauthorized')toast('Unbind failed: '+e.message,'error');}loadRepos();}
 async function doRemove(id){const r=repos.find(x=>x.id===id);if(!r)return;if(!confirm('Remove "'+r.name+'" and delete its directory/index?'))return;r.status='removing';r.message='Removing...';renderRepos();renderStats();try{await api('api/repos/'+id+'/remove',{method:'POST'});toast('Removed','success');}catch(e){if(e.message!=='unauthorized')toast('Remove failed: '+e.message,'error');}loadRepos();}
 
+function mcpEndpointUrl(){return new URL('mcp',location.href).href;}
+function isLoopbackHost(){return ['127.0.0.1','localhost','::1'].includes(location.hostname);}
+function mcpConfig(){const url=mcpEndpointUrl();const server={url};if(!isLoopbackHost())server.headers={Authorization:'Bearer <MCP_TOKEN>'};return JSON.stringify({mcpServers:{cgm:server}},null,2);}
+function fillMcp(){const url=mcpEndpointUrl();if(!$('mcpEndpoint'))return;$('mcpEndpoint').textContent=url;$('mcpSnippet').textContent=mcpConfig();$('mcpAuthNote').textContent=isLoopbackHost()?'Access from this machine does not require a token. Remote clients must send Authorization: Bearer <MCP_TOKEN> (falls back to ADMIN_TOKEN).':'This host is not loopback. Add your MCP_TOKEN as a Bearer header before connecting.';}
+async function copyText(text){try{await navigator.clipboard.writeText(text);return true}catch(e){const ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);ta.select();let ok=false;try{ok=document.execCommand('copy')}catch(e2){}ta.remove();return ok}}
+function selectText(el){if(!el)return;const r=document.createRange();r.selectNodeContents(el);const s=getSelection();s.removeAllRanges();s.addRange(r);}
+async function copyMcpUrl(){const ok=await copyText(mcpEndpointUrl());if(!ok)selectText($('mcpEndpoint'));toast(ok?'MCP endpoint copied':'Copy failed — text selected, press Ctrl+C',ok?'success':'error');}
+async function copyMcpConfig(){const ok=await copyText(mcpConfig());if(!ok)selectText($('mcpSnippet'));toast(ok?'MCP client config copied':'Copy failed — text selected, press Ctrl+C',ok?'success':'error');}
+fillMcp();
 loadSettings().catch(()=>{});loadRepos().catch(()=>{});
 
 /* SSE */

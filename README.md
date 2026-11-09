@@ -87,6 +87,8 @@ cgm                                  # 任意目录一键启动
 
 MCP 端点：`http://127.0.0.1:8801/mcp`（Streamable HTTP / JSON-RPC 2.0）
 
+> UI 入口：**Settings → MCP access** 可直接复制 endpoint 与 `mcpServers` 客户端配置；本机生成无 header 版本，非 loopback 自动带 Bearer 占位。
+
 **Cursor / Claude Desktop / Cline**（`mcpServers` 标准格式，本仓库附带 `mcp-config.json`）：
 
 ```json

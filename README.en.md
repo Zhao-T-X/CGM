@@ -86,6 +86,8 @@ Open **http://127.0.0.1:8801** → Settings → add a provider → Add Selected 
 
 MCP endpoint: `http://127.0.0.1:8801/mcp` (Streamable HTTP / JSON-RPC 2.0)
 
+> UI: **Settings → MCP access** copies the endpoint and a ready `mcpServers` config; loopback gets a header-free version, non-loopback includes a Bearer placeholder.
+
 **Cursor / Claude Desktop / Cline** (standard `mcpServers` format, also shipped as `mcp-config.json`):
 
 ```json
