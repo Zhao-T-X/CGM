@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cgm": {
+      "url": "http://127.0.0.1:8801/mcp",
+      "headers": { "Authorization": "Bearer <MCP_TOKEN>" }
+    }
+  }
+}
