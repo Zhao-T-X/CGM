@@ -75,7 +75,7 @@ bash install.sh --port 8801          # Linux / macOS
 
 ```bash
 npm i -g @colbymchenry/codegraph     # the only external dependency
-npm i -g codegraph-manager           # or: npm i -g . inside this repo
+npm i -g @kennyzhao/cgm              # or: npm i -g . inside this repo
 cgm                                  # start from any directory
 ```
 
@@ -198,7 +198,7 @@ node verify-mcp.mjs            # regression suite: 49 assertions (protocol/auth/
 ```
 
 ```
-codegraph-manager/
+cgm/
 ├── cli.mjs            CLI entry (the cgm command)
 ├── server.mjs         HTTP backend (route auth, providers/repos/spaces, SQLite persistence)
 ├── mcp.mjs            MCP module (4 tools + CodeGraph stdio gateway client)

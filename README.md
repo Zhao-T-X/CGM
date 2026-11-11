@@ -76,7 +76,7 @@ bash install.sh --port 8801          # Linux / macOS
 
 ```bash
 npm i -g @colbymchenry/codegraph     # 唯一外部依赖
-npm i -g codegraph-manager           # 或在本仓库根目录 npm i -g .
+npm i -g @kennyzhao/cgm              # 或在本仓库根目录 npm i -g .
 cgm                                  # 任意目录一键启动
 ```
 
@@ -199,7 +199,7 @@ node verify-mcp.mjs            # 回归测试：49 项断言（协议/鉴权/安
 ```
 
 ```
-codegraph-manager/
+cgm/
 ├── cli.mjs            CLI 入口（cgm 命令）
 ├── server.mjs         HTTP 后端（路由鉴权、提供商/仓库/空间、SQLite 持久化）
 ├── mcp.mjs            MCP 模块（4 工具 + CodeGraph stdio 网关客户端）
