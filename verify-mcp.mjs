@@ -150,6 +150,9 @@ async function main() {
     for (const r of rows) JSON.parse(r.data); // 每行载荷可解析 = 注册表未损坏
   } catch { jsonOk = false; }
   check('SQLite repos 表未损坏（并发操作后行数一致且可解析）', jsonOk && rowCount === 0, 'rows=' + rowCount);
+  const localAudit = await fetch(H + '/api/audit-logs?actorId=local%3Alocal');
+  const localAuditBody = await localAudit.json();
+  check('local actor 可按时间线筛选审计记录', localAudit.status === 200 && localAuditBody.items?.length > 0);
   sA.kill('SIGTERM');
 
   /* ---------- 实例 B：LOCAL_NO_AUTH=0 + ADMIN_TOKEN（鉴权强制） ---------- */

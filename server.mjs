@@ -795,7 +795,7 @@ const server = http.createServer(async (req, res) => {
         return !!repo && repoVisible(principal, repo);
       });
       const filtered = allowed.filter(row => {
-        if (query.actorId && row.actor_id !== query.actorId) return false;
+        if (query.actorId && (row.actor_id || `${row.actor_type}:${row.actor_name}`) !== query.actorId) return false;
         if (query.actorType && row.actor_type !== query.actorType) return false;
         if (query.source && row.source !== query.source) return false;
         if (query.action && row.action !== query.action) return false;
