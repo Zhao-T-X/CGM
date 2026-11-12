@@ -105,7 +105,14 @@ function openDb() {
   db.exec('PRAGMA journal_mode=WAL');
   db.exec(`CREATE TABLE IF NOT EXISTS repos (id TEXT PRIMARY KEY, data TEXT NOT NULL);
            CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, data TEXT NOT NULL);
-           CREATE TABLE IF NOT EXISTS api_tokens (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, roles TEXT NOT NULL, space_ids TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER, revoked_at INTEGER);`);
+           CREATE TABLE IF NOT EXISTS api_tokens (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL UNIQUE, roles TEXT NOT NULL, space_ids TEXT NOT NULL, created_at INTEGER NOT NULL, last_used_at INTEGER, revoked_at INTEGER);
+           CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, actor_type TEXT NOT NULL, actor_id TEXT, actor_name TEXT NOT NULL, source TEXT NOT NULL, action TEXT NOT NULL, method TEXT, path TEXT, tool_name TEXT, repo_id TEXT, repo_name TEXT, branch TEXT, status_code INTEGER, result TEXT NOT NULL, duration_ms INTEGER, client_ip TEXT, user_agent TEXT, query_preview TEXT, error TEXT);
+           CREATE INDEX IF NOT EXISTS audit_logs_created_idx ON audit_logs(created_at);
+           CREATE INDEX IF NOT EXISTS audit_logs_actor_idx ON audit_logs(actor_id, actor_type);
+           CREATE INDEX IF NOT EXISTS audit_logs_action_idx ON audit_logs(action, tool_name);
+           CREATE INDEX IF NOT EXISTS audit_logs_repo_idx ON audit_logs(repo_id);
+           CREATE INDEX IF NOT EXISTS audit_logs_result_idx ON audit_logs(result);
+           CREATE INDEX IF NOT EXISTS audit_logs_ip_idx ON audit_logs(client_ip);`);
   migrateJsonToSqlite();
 }
 function migrateJsonToSqlite() {
@@ -514,6 +521,24 @@ const canMcp = (p) => !!p && (p.admin || p.roles.includes('mcp'));
 function repoVisible(p, repo) { if (!p || p.admin || !p.spaceIds) return true; return (repo.spaceIds || []).some(id => p.spaceIds.includes(id)); }
 function visibleSpaces(p) { if (!p || p.admin || !p.spaceIds) return settings.spaces; return settings.spaces.filter(s => s.builtin || p.spaceIds.includes(s.id)); }
 function principalDto(p) { return { admin: p.admin, roles: p.roles, spaceIds: p.spaceIds, spaces: visibleSpaces(p).map(s => ({ id: s.id, name: s.name, builtin: !!s.builtin })), name: p.name, source: p.source }; }
+const auditLimit = (value, max) => String(value ?? '').slice(0, max);
+function auditActor(req, principal) {
+  const p = principal || {};
+  const actorType = p.admin ? (p.source === 'loopback' ? 'local' : 'admin') : (p.source === 'env' ? 'env_mcp' : (p.source === 'token' ? 'token' : 'unknown'));
+  return { actorType, actorId: p.id || null, actorName: auditLimit(p.name || 'unknown', 120), source: p.roles?.includes('mcp') && !p.roles?.includes('web') ? 'mcp' : 'web', clientIp: auditLimit(clientAddr(req), 100), userAgent: auditLimit(req.headers['user-agent'] || '', 300) };
+}
+function writeAudit(event) {
+  try {
+    db.prepare(`INSERT INTO audit_logs (id, created_at, actor_type, actor_id, actor_name, source, action, method, path, tool_name, repo_id, repo_name, branch, status_code, result, duration_ms, client_ip, user_agent, query_preview, error)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      event.id || crypto.randomUUID(), event.createdAt || Date.now(), event.actorType || 'unknown', event.actorId || null, auditLimit(event.actorName || 'unknown', 120), event.source || 'web', auditLimit(event.action || 'unknown', 120), auditLimit(event.method || '', 12), auditLimit(event.path || '', 300), auditLimit(event.toolName || '', 120), event.repoId || null, auditLimit(event.repoName || '', 160), auditLimit(event.branch || '', 160), Number.isFinite(event.statusCode) ? event.statusCode : null, auditLimit(event.result || 'unknown', 32), Number.isFinite(event.durationMs) ? event.durationMs : null, auditLimit(event.clientIp || '', 100), auditLimit(event.userAgent || '', 300), auditLimit(event.queryPreview || '', 500), auditLimit(event.error || '', 500)
+    );
+  } catch (e) { log('audit write failed:', e.message); }
+}
+function auditEvent(req, principal, event = {}) { writeAudit({ ...auditActor(req, principal), method: req.method, path: req.url.split('?')[0], ...event }); }
+function auditMcpEvent(req, principal, event = {}) { auditEvent(req, principal, { source: 'mcp', ...event }); }
+function auditDenied(req, principal, action, statusCode, error) { auditEvent(req, principal, { action, result: 'denied', statusCode, error }); }
+function auditRepoFields(repo) { return repo ? { repoId: repo.id, repoName: repo.name, branch: repo.branch || '' } : {}; }
 async function staticServe(req, res, pathname) {
   if (pathname === '/' || pathname === '/index.html') {
     const f = path.join(HERE, 'public', 'index.html');
@@ -750,15 +775,44 @@ const server = http.createServer(async (req, res) => {
     // MCP 端点（GET /mcp 走 SSE、POST 走消息；/mcp/message 走消息）—— 路由级守卫
     if (pathname === '/mcp' || pathname === '/mcp/message') {
       const principal = resolvePrincipal(req, query, true);
-      if (!canMcp(principal)) return sendJson(res, 401, { error: principal ? 'mcp_role_required' : 'unauthorized' });
+      if (!canMcp(principal)) { auditDenied(req, principal, 'mcp.access', 401, principal ? 'mcp_role_required' : 'unauthorized'); return sendJson(res, 401, { error: principal ? 'mcp_role_required' : 'unauthorized' }); }
       if (pathname === '/mcp' && req.method === 'GET') return handleSseConnection(req, res);
       const visible = principal.spaceIds ? repos.filter(r => repoVisible(principal, r)) : repos;
-      return await handleMcpMessage(req, res, visible);
+      return await handleMcpMessage(req, res, visible, principal, (event) => auditMcpEvent(req, principal, event));
     }
     if (!pathname.startsWith('/api/')) return staticServe(req, res, pathname); // 页面本身公开（否则前端拿不到令牌表单）
     const principal = resolvePrincipal(req, {}, false);
-    if (!canWeb(principal)) return sendJson(res, 401, { error: principal ? 'web_role_required' : 'unauthorized' });
+    if (!canWeb(principal)) { auditDenied(req, principal, 'api.access', 401, principal ? 'web_role_required' : 'unauthorized'); return sendJson(res, 401, { error: principal ? 'web_role_required' : 'unauthorized' }); }
     if (pathname === '/api/auth/me' && req.method === 'GET') return sendJson(res, 200, principalDto(principal));
+
+    if (pathname === '/api/audit-logs' && req.method === 'GET') {
+      if (!principal.admin && !principal.roles.includes('web')) return sendJson(res, 403, { error: 'web_role_required' });
+      const all = db.prepare('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 5000').all();
+      const allowed = all.filter(row => {
+        if (principal.admin) return true;
+        if (row.actor_id && row.actor_id === principal.id) return true;
+        const repo = row.repo_id ? repos.find(r => r.id === row.repo_id) : null;
+        return !!repo && repoVisible(principal, repo);
+      });
+      const filtered = allowed.filter(row => {
+        if (query.actorId && row.actor_id !== query.actorId) return false;
+        if (query.actorType && row.actor_type !== query.actorType) return false;
+        if (query.source && row.source !== query.source) return false;
+        if (query.action && row.action !== query.action) return false;
+        if (query.toolName && row.tool_name !== query.toolName) return false;
+        if (query.repoId && row.repo_id !== query.repoId) return false;
+        if (query.result && row.result !== query.result) return false;
+        if (query.ip && row.client_ip !== query.ip) return false;
+        if (query.from && row.created_at < Number(query.from)) return false;
+        if (query.to && row.created_at > Number(query.to)) return false;
+        if (query.q) { const hay = [row.actor_name, row.action, row.tool_name, row.repo_name, row.client_ip, row.error].join(' ').toLowerCase(); if (!hay.includes(String(query.q).toLowerCase())) return false; }
+        return true;
+      });
+      const offset = Math.max(0, Number.parseInt(query.cursor || '0', 10) || 0);
+      const limit = Math.min(100, Math.max(1, Number.parseInt(query.limit || '50', 10) || 50));
+      const items = filtered.slice(offset, offset + limit).map(row => ({ id: row.id, createdAt: row.created_at, actorType: row.actor_type, actorId: row.actor_id, actorName: row.actor_name, source: row.source, action: row.action, method: row.method, path: row.path, toolName: row.tool_name, repoId: row.repo_id, repoName: row.repo_name, branch: row.branch, statusCode: row.status_code, result: row.result, durationMs: row.duration_ms, clientIp: row.client_ip, userAgent: row.user_agent, queryPreview: row.query_preview, error: row.error }));
+      return sendJson(res, 200, { items, nextCursor: offset + items.length < filtered.length ? String(offset + items.length) : null, total: filtered.length });
+    }
 
     // 访问令牌管理（仅 admin）
     if (pathname === '/api/tokens') {
@@ -777,6 +831,7 @@ const server = http.createServer(async (req, res) => {
         const token = 'cgm_' + crypto.randomBytes(24).toString('base64url');
         const id = crypto.randomUUID();
         db.prepare('INSERT INTO api_tokens (id, name, token_hash, roles, space_ids, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(id, name, tokenHash(token), JSON.stringify(roles), JSON.stringify(spaceIds), Date.now());
+        auditEvent(req, principal, { action: 'token.create', result: 'success', statusCode: 201, actorName: principal.name, error: `created token ${name}` });
         return sendJson(res, 201, { ...tokenRowDto(db.prepare('SELECT * FROM api_tokens WHERE id = ?').get(id)), token });
       }
     }
@@ -786,6 +841,7 @@ const server = http.createServer(async (req, res) => {
       const row = db.prepare('SELECT id FROM api_tokens WHERE id = ?').get(tkm[1]);
       if (!row) return sendJson(res, 404, { error: 'no_such_token' });
       db.prepare('UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL').run(Date.now(), tkm[1]);
+      auditEvent(req, principal, { action: 'token.revoke', result: 'success', statusCode: 200, actorName: principal.name, error: `revoked token ${tkm[1]}` });
       return sendJson(res, 200, { ok: true });
     }
 
@@ -808,7 +864,7 @@ const server = http.createServer(async (req, res) => {
         settings.autoSyncHours = (b.autoSyncHours === null || b.autoSyncHours === '') ? null : Number(b.autoSyncHours);
         scheduleSync(); // 频率变更立即重建定时器
       }
-      await saveSettings(); return sendJson(res, 200, toSettingsDto(settings));
+       await saveSettings(); auditEvent(req, principal, { action: 'settings.update', result: 'success', statusCode: 200 }); return sendJson(res, 200, toSettingsDto(settings));
     }
 
     // 空间（标签/分组）CRUD
@@ -823,8 +879,8 @@ const server = http.createServer(async (req, res) => {
       if (!name) return sendJson(res, 400, { error: 'missing name' });
       if (settings.spaces.some(s => s.name === name)) return sendJson(res, 409, { error: 'space exists' });
       const space = { id: crypto.randomUUID(), name, builtin: false, order: (settings.spaces.reduce((m, s) => Math.max(m, s.order ?? 0), 0) + 1) };
-      settings.spaces.push(space);
-      await saveSettings();
+       settings.spaces.push(space);
+       await saveSettings(); auditEvent(req, principal, { action: 'space.create', result: 'success', statusCode: 201 });
       return sendJson(res, 201, space);
     }
     const spm = pathname.match(/^\/api\/spaces\/([^/]+)$/);
@@ -836,7 +892,7 @@ const server = http.createServer(async (req, res) => {
         const b = await readBody(req);
         if (b.name !== undefined && !space.builtin) space.name = (b.name || '').trim() || space.name;
         if (b.order !== undefined) space.order = Number(b.order);
-        await saveSettings();
+         await saveSettings(); auditEvent(req, principal, { action: 'space.update', result: 'success', statusCode: 200, error: `space ${space.name}` });
         return sendJson(res, 200, space);
       }
       if (req.method === 'DELETE') {
@@ -854,7 +910,7 @@ const server = http.createServer(async (req, res) => {
             if (next.length !== ids.length) upd.run(JSON.stringify(next), t.id);
           }
         } catch {}
-        await saveRepos(); await saveSettings();
+         await saveRepos(); await saveSettings(); auditEvent(req, principal, { action: 'space.delete', result: 'success', statusCode: 200, error: `space ${space.name}` });
         return sendJson(res, 200, { ok: true });
       }
     }
@@ -868,8 +924,8 @@ const server = http.createServer(async (req, res) => {
       const repoId = b.repoId;
       const repo = repos.find(r => r.id === repoId);
       if (!repo) return sendJson(res, 404, { error: 'no_such_repo' });
-      repo.spaceIds = [...new Set([...(repo.spaceIds || []), space.id])];
-      await saveRepos();
+       repo.spaceIds = [...new Set([...(repo.spaceIds || []), space.id])];
+       await saveRepos(); auditEvent(req, principal, { action: 'space.bind', result: 'success', statusCode: 200, ...auditRepoFields(repo) });
       return sendJson(res, 200, repo);
     }
     const spunbind = pathname.match(/^\/api\/spaces\/([^/]+)\/repos\/([^/]+)$/);
@@ -877,8 +933,8 @@ const server = http.createServer(async (req, res) => {
       if (!principal.admin) return sendJson(res, 403, { error: 'admin_required' });
       const repo = repos.find(r => r.id === spunbind[2]);
       if (!repo) return sendJson(res, 404, { error: 'no_such_repo' });
-      repo.spaceIds = (repo.spaceIds || []).filter(id => id !== spunbind[1]);
-      await saveRepos();
+       repo.spaceIds = (repo.spaceIds || []).filter(id => id !== spunbind[1]);
+       await saveRepos(); auditEvent(req, principal, { action: 'space.unbind', result: 'success', statusCode: 200, ...auditRepoFields(repo) });
       return sendJson(res, 200, repo);
     }
 
@@ -903,7 +959,7 @@ const server = http.createServer(async (req, res) => {
       };
       settings.providers.push(provider);
       if (!settings.activeProviderId) settings.activeProviderId = provider.id;
-      await saveSettings();
+      await saveSettings(); auditEvent(req, principal, { action: 'provider.create', result: 'success', statusCode: 201 });
       return sendJson(res, 201, { ...provider, token: provider.token ? '***' : '' });
     }
     if (pathname.match(/^\/api\/providers\/[^/]+$/) && req.method === 'PUT') {
@@ -916,7 +972,7 @@ const server = http.createServer(async (req, res) => {
       if (b.url !== undefined) provider.url = b.url;
       // 回传脱敏掩码值 → 忽略，不得覆盖真实 token
       if (b.token !== undefined && !String(b.token).startsWith(TOKEN_MASK)) provider.token = b.token;
-      await saveSettings();
+       await saveSettings(); auditEvent(req, principal, { action: 'provider.update', result: 'success', statusCode: 200 });
       return sendJson(res, 200, { ...provider, token: provider.token ? '***' : '' });
     }
     if (pathname.match(/^\/api\/providers\/[^/]+$/) && req.method === 'DELETE') {
@@ -926,7 +982,7 @@ const server = http.createServer(async (req, res) => {
       if (i < 0) return sendJson(res, 404, { error: 'provider not found' });
       settings.providers.splice(i, 1);
       if (settings.activeProviderId === id) settings.activeProviderId = settings.providers[0]?.id || '';
-      await saveSettings();
+       await saveSettings(); auditEvent(req, principal, { action: 'provider.delete', result: 'success', statusCode: 200 });
       return sendJson(res, 200, { ok: true });
     }
 
@@ -977,13 +1033,14 @@ const server = http.createServer(async (req, res) => {
       const existing = b.gitUrl && repos.find(r => r.gitUrl === b.gitUrl && r.providerId === (b.providerId || settings.activeProviderId));
       if (existing) {
         const before = (existing.spaceIds || []).slice();
-        existing.spaceIds = [...new Set([...(existing.spaceIds || []), ...spaceIds])];
-        await saveRepos();
+         existing.spaceIds = [...new Set([...(existing.spaceIds || []), ...spaceIds])];
+         await saveRepos();
+         auditEvent(req, principal, { action: 'repo.create', result: 'success', statusCode: 200, ...auditRepoFields(existing) });
         return sendJson(res, 200, { ...existing, _dedup: true, addedSpaces: existing.spaceIds.filter(id => !before.includes(id)) });
       }
       const id = crypto.randomUUID();
       const repo = { id, name: b.name, providerId: b.providerId || settings.activeProviderId, providerType: b.providerType || '', gitUrl: b.gitUrl, branch: b.branch || '', localPath: null, status: 'registered', message: '', addedAt: Date.now(), worktrees: [], spaceIds };
-      repos.push(repo); await saveRepos();
+       repos.push(repo); await saveRepos(); auditEvent(req, principal, { action: 'repo.create', result: 'success', statusCode: 201, ...auditRepoFields(repo) });
       return sendJson(res, 201, repo);
     }
 
@@ -1057,7 +1114,7 @@ const server = http.createServer(async (req, res) => {
             gitUrl, branch, localPath, status: 'cloned', message: 'Added from local directory',
             addedAt: Date.now()
           };
-          repos.push(repo); await saveRepos();
+           repos.push(repo); await saveRepos(); auditEvent(req, principal, { action: 'repo.create', result: 'success', statusCode: 201, ...auditRepoFields(repo) });
           return sendJson(res, 201, repo);
         }
 
@@ -1101,6 +1158,8 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.write(JSON.stringify({ ok: true, msg: 'started' }));
       res.end();
+      const auditBase = { action: `repo.${action}`, ...auditRepoFields(repo) };
+      auditEvent(req, principal, { ...auditBase, result: 'accepted', statusCode: 200 });
       // 同仓操作互斥：并发请求（双击/analyze+remove 同发）在仓锁上排队串行，不交叉执行
       withRepoLock(repo.id, async () => {
         try {
@@ -1109,9 +1168,10 @@ const server = http.createServer(async (req, res) => {
           else if (action === 'analyze') ok = await opAnalyze(repo);
           else if (action === 'status') ok = await opStatus(repo);
           else if (action === 'sync') ok = await opSync(repo);
-          else if (action === 'remove') { await opRemove(repo); return; }
+          else if (action === 'remove') { await opRemove(repo); ok = true; }
+          auditEvent(req, principal, { ...auditBase, result: action === 'remove' || ok ? 'success' : 'failed', statusCode: action === 'remove' || ok ? 200 : 500, error: action === 'remove' || ok ? '' : repo.message });
           log(`repo ${repo.name} ${action} -> ${ok ? 'ok' : 'fail'}`);
-        } catch (e) { log('op error', e); }
+        } catch (e) { auditEvent(req, principal, { ...auditBase, result: 'failed', statusCode: 500, error: e.message }); log('op error', e); }
       });
       return;
     }

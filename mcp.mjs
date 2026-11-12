@@ -132,7 +132,7 @@ export function handleSseConnection(req, res) {
 }
 
 // 处理 MCP 消息（通过 POST；鉴权与 OPTIONS 预检已由 server.mjs 路由层完成）
-export async function handleMcpMessage(req, res, repos) {
+export async function handleMcpMessage(req, res, repos, principal = null, audit = null) {
   // 设置 CORS 头（需允许 MCP 协议头，否则浏览器直连预检失败）
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -169,6 +169,7 @@ export async function handleMcpMessage(req, res, repos) {
   }
 
   const { jsonrpc, method, params, id } = request;
+  const startedAt = Date.now();
 
   // 验证 JSON-RPC 版本
   if (jsonrpc !== '2.0') {
@@ -214,6 +215,23 @@ export async function handleMcpMessage(req, res, repos) {
       res.writeHead(404, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32601, message: 'Method not found' }, id }));
       return;
+  }
+
+  if (audit && ['initialize', 'tools/list', 'tools/call'].includes(method)) {
+    const args = params?.arguments || {};
+    const target = args.repo ? repos.find(r => r.name.toLowerCase() === String(args.repo).toLowerCase() || r.id === args.repo) : null;
+    audit({
+      action: `mcp.${method === 'tools/call' ? 'tools_call' : method === 'tools/list' ? 'tools_list' : 'initialize'}`,
+      toolName: method === 'tools/call' ? String(params?.name || '') : '',
+      repoId: target?.id || null,
+      repoName: target?.name || (args.repo ? String(args.repo) : ''),
+      branch: args.branch || target?.branch || '',
+      queryPreview: method === 'tools/call' && params?.name === 'search_code' ? String(args.query || '').slice(0, 500) : '',
+      result: result?.isError ? 'failed' : 'success',
+      statusCode: result?.isError ? 500 : 200,
+      durationMs: Date.now() - startedAt,
+      error: result?.isError ? 'MCP tool returned an error' : ''
+    });
   }
 
   // 发送响应（仅返回给发起方；不再经 SSE 广播给其他客户端，防止跨客户端泄露查询结果）

@@ -39,6 +39,7 @@
 **安全**
 - 路由级鉴权 —— `/api/*` 与 `/mcp*` 分别持 `ADMIN_TOKEN` / `MCP_TOKEN`，`timingSafeEqual` 恒时比较
 - 角色化访问令牌 —— Settings → Access tokens 创建 `web` / `mcp` token；web 只能查看/操作授权空间内的仓库，mcp 只能检索授权空间，admin 无限制
+- 审计中心 —— Settings → Audit Logs 按 token 时间线查看 Web/MCP 操作、来源 IP、User-Agent、目标仓库、耗时和结果；不保存 token 明文或完整代码结果
 - 回环免鉴权 —— 本机访问默认放行（同源校验防网页打本地），对外开放时 fail-closed：无 token 拒绝启动
 - 首启自动生成随机令牌（192bit）持久化到 `auth.json`，不用手动配也能安全对外开放
 - Token 三重防护 —— 落盘 AES-256-GCM 加密、API 返回脱敏（掩码+末4位）、PUT 掩码不覆盖真值
@@ -49,7 +50,7 @@
 - 三级并发治理 —— 全局索引队列限流 + 单仓生命周期互斥 + 每文件写串行，多仓并发不互踩
 - 重启自愈 —— 中断的运行中状态自动重置；`CODEGRAPH_BIN` 自动探测，Windows 无需手配
 - SSE 实时推送状态，30s 兜底轮询；`BASE_PATH` 支持反代子路径部署
-- 内置回归脚本 `node verify-mcp.mjs`（49 项断言：协议合规 / 鉴权 / 脱敏 / 并发 / 迁移）
+- 内置回归脚本 `node verify-mcp.mjs`（多项断言：协议合规 / 鉴权 / 脱敏 / 审计 / 并发 / 迁移）
 
 ## 📸 界面
 
@@ -161,6 +162,7 @@ MCP 端点：`http://127.0.0.1:8801/mcp`（Streamable HTTP / JSON-RPC 2.0）
 | `/api/repos/:id/worktree/:branch` | POST/DELETE | 分支 worktree 创建 / 删除 |
 | `/api/spaces[/...]` | GET/POST/PUT/DELETE | 空间分组管理 / 仓库绑定 |
 | `/api/tokens[/...]` | GET/POST/DELETE | 访问令牌管理（admin）：角色 + 空间范围 |
+| `/api/audit-logs` | GET | 审计活动查询（admin / 授权 web token） |
 | `/api/browse?path=` | GET | 服务端目录浏览（添加本地仓库用） |
 | `/mcp` · `/mcp/message` | POST/GET | MCP 端点（Streamable HTTP + SSE） |
 
@@ -195,7 +197,7 @@ Windows 全局安装的 codegraph 是 bash shim，PATH 直接 spawn 不通。本
 ```bash
 git clone https://github.com/Zhao-T-X/CGM.git && cd CGM
 node server.mjs                # 开发启动（127.0.0.1:8801）
-node verify-mcp.mjs            # 回归测试：49 项断言（协议/鉴权/安全/并发/迁移）
+node verify-mcp.mjs            # 回归测试：多项断言（协议/鉴权/安全/审计/并发/迁移）
 ```
 
 ```
@@ -203,7 +205,7 @@ cgm/
 ├── cli.mjs            CLI 入口（cgm 命令）
 ├── server.mjs         HTTP 后端（路由鉴权、提供商/仓库/空间、SQLite 持久化）
 ├── mcp.mjs            MCP 模块（4 工具 + CodeGraph stdio 网关客户端）
-├── verify-mcp.mjs     回归脚本（49 项断言，临时实例隔离运行）
+├── verify-mcp.mjs     回归脚本（临时实例隔离运行）
 ├── public/index.html  前端单文件（Vercel 风深色 UI）
 └── install.sh/.cmd    一键安装脚本
 ```

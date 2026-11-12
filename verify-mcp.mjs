@@ -170,6 +170,23 @@ async function main() {
   check('带 Bearer notifications → 202', aNotif.status === 202, 'status=' + aNotif.status);
   const api200 = await fetch(BA + '/api/repos', { headers: auth });
   check('带 Bearer /api/repos → 200', api200.status === 200, 'status=' + api200.status);
+  const audit = await fetch(BA + '/api/audit-logs', { headers: auth });
+  const auditBody = await audit.json();
+  check('admin 可读取审计日志 → 200', audit.status === 200);
+  check('审计记录 MCP initialize/tools/list', auditBody.items?.some((x) => x.action === 'mcp.initialize') && auditBody.items?.some((x) => x.action === 'mcp.tools_list'));
+  check('审计记录包含来源 IP 与 User-Agent', auditBody.items?.some((x) => x.clientIp === '127.0.0.1' && x.userAgent === '') || auditBody.items?.some((x) => x.clientIp === '127.0.0.1'));
+  const auditRaw = JSON.stringify(auditBody);
+  check('审计返回不含 admin token', !auditRaw.includes(TOKEN));
+  const auditDb = new DatabaseSync(path.join(ROOT, 'data-auth', 'cgm.db'));
+  check('SQLite audit_logs 有记录', auditDb.prepare('SELECT COUNT(*) AS n FROM audit_logs').get().n >= 4);
+  const webTokenResp = await postJson(BA + '/api/tokens', { name: 'audit-web', roles: ['web'], spaceIds: [] }, auth);
+  const webTokenBody = await webTokenResp.json();
+  const webAudit = await fetch(BA + '/api/audit-logs', { headers: { Authorization: 'Bearer ' + webTokenBody.token } });
+  check('web token 可读取审计接口 → 200', webAudit.status === 200);
+  const mcpTokenResp = await postJson(BA + '/api/tokens', { name: 'audit-mcp', roles: ['mcp'], spaceIds: [] }, auth);
+  const mcpTokenBody = await mcpTokenResp.json();
+  const mcpAudit = await fetch(BA + '/api/audit-logs', { headers: { Authorization: 'Bearer ' + mcpTokenBody.token } });
+  check('MCP-only token 不能读取审计接口', mcpAudit.status === 401);
   sB.kill('SIGTERM');
 
   /* ---------- 实例 C：HOST=0.0.0.0 无 env → 自动生成令牌，正常启动 ---------- */

@@ -38,6 +38,7 @@ The whole pipeline — clone → index → AI retrieval — runs automatically. 
 **Security**
 - Route-level auth — `/api/*` and `/mcp*` guarded by `ADMIN_TOKEN` / `MCP_TOKEN`, constant-time comparison
 - Role-based access tokens — Settings → Access tokens creates `web` / `mcp` tokens; web tokens only see/operate repositories in their spaces, mcp tokens only search their spaces, admin is unrestricted
+- Audit center — Settings → Audit Logs shows Web/MCP activity by token, source IP, User-Agent, repository, duration, and result; raw tokens and full code results are never stored
 - Loopback exemption — local access allowed by default (with same-origin checks so web pages can't hit your localhost); fail-closed when exposed: refuses to start without a token
 - Auto-generated 192-bit token on first start, persisted to `auth.json` — safe to expose without any manual setup
 - Token protection, three layers — AES-256-GCM at rest, masked in API responses (dots + last 4), masked PUT values never overwrite real tokens
@@ -48,7 +49,7 @@ The whole pipeline — clone → index → AI retrieval — runs automatically. 
 - Three-tier concurrency control — global index queue + per-repo lifecycle mutex + per-file write serialization
 - Restart self-healing — interrupted in-flight states reset automatically; `CODEGRAPH_BIN` auto-detected (no manual config on Windows)
 - SSE live status push with 30s polling fallback; `BASE_PATH` for reverse-proxy sub-path deployments
-- Built-in regression suite `node verify-mcp.mjs` (49 assertions: protocol / auth / masking / concurrency / migration)
+- Built-in regression suite `node verify-mcp.mjs` (protocol / auth / masking / audit / concurrency / migration assertions)
 
 ## 📸 Screenshots
 
@@ -160,6 +161,7 @@ Branch-scoped query example:
 | `/api/repos/:id/worktree/:branch` | POST/DELETE | Create / remove a branch worktree |
 | `/api/spaces[/...]` | GET/POST/PUT/DELETE | Space management / repo binding |
 | `/api/tokens[/...]` | GET/POST/DELETE | Access-token management (admin): roles + space scopes |
+| `/api/audit-logs` | GET | Audit activity query (admin / scoped web token) |
 | `/api/browse?path=` | GET | Server-side directory browser (for adding local repos) |
 | `/mcp` · `/mcp/message` | POST/GET | MCP endpoint (Streamable HTTP + SSE) |
 
@@ -194,7 +196,7 @@ Check the status column: `pull_failed` means the scheduled pull failed (retried 
 ```bash
 git clone https://github.com/Zhao-T-X/CGM.git && cd CGM
 node server.mjs                # dev server (127.0.0.1:8801)
-node verify-mcp.mjs            # regression suite: 49 assertions (protocol/auth/security/concurrency/migration)
+node verify-mcp.mjs            # regression suite: protocol/auth/security/audit/concurrency/migration assertions
 ```
 
 ```
@@ -202,7 +204,7 @@ cgm/
 ├── cli.mjs            CLI entry (the cgm command)
 ├── server.mjs         HTTP backend (route auth, providers/repos/spaces, SQLite persistence)
 ├── mcp.mjs            MCP module (4 tools + CodeGraph stdio gateway client)
-├── verify-mcp.mjs     Regression suite (49 assertions, isolated temp instances)
+├── verify-mcp.mjs     Regression suite (isolated temp instances)
 ├── public/index.html  Single-file frontend (Vercel-style dark UI)
 └── install.sh/.cmd    One-click installers
 ```
