@@ -785,6 +785,26 @@ const server = http.createServer(async (req, res) => {
     if (!canWeb(principal)) { auditDenied(req, principal, 'api.access', 401, principal ? 'web_role_required' : 'unauthorized'); return sendJson(res, 401, { error: principal ? 'web_role_required' : 'unauthorized' }); }
     if (pathname === '/api/auth/me' && req.method === 'GET') return sendJson(res, 200, principalDto(principal));
 
+    if (pathname === '/api/audit-summary' && req.method === 'GET') {
+      if (!principal.admin && !principal.roles.includes('web')) return sendJson(res, 403, { error: 'web_role_required' });
+      const range = query.range === '7d' ? 7 * 86400000 : query.range === '30d' ? 30 * 86400000 : 86400000;
+      const now = Date.now(), from = now - range;
+      const rows = db.prepare('SELECT * FROM audit_logs WHERE created_at >= ? ORDER BY created_at DESC LIMIT 5000').all(from).filter(row => {
+        if (principal.admin) return true;
+        if (row.actor_id && row.actor_id === principal.id) return true;
+        const repo = row.repo_id ? repos.find(r => r.id === row.repo_id) : null;
+        return !!repo && repoVisible(principal, repo);
+      });
+      const success = rows.filter(r => r.result === 'success').length;
+      const failed = rows.filter(r => r.result === 'failed' || r.result === 'denied').length;
+      const trendSize = range <= 86400000 ? 24 : range <= 7 * 86400000 ? 7 * 24 : 30;
+      const bucketMs = range / trendSize;
+      const trend = Array.from({ length: trendSize }, (_, i) => ({ at: from + i * bucketMs, mcp: 0, web: 0, failed: 0 }));
+      for (const row of rows) { const i = Math.min(trendSize - 1, Math.max(0, Math.floor((row.created_at - from) / bucketMs))); const point = trend[i]; if (row.source === 'mcp') point.mcp++; else point.web++; if (row.result === 'failed' || row.result === 'denied') point.failed++; }
+      const recentFailures = rows.filter(r => r.result === 'failed' || r.result === 'denied').slice(0, 5).map(r => ({ createdAt: r.created_at, actorName: r.actor_name, source: r.source, action: r.tool_name || r.action, repoName: r.repo_name, result: r.result, error: r.error }));
+      return sendJson(res, 200, { range: query.range || '24h', total: rows.length, mcp: rows.filter(r => r.source === 'mcp').length, web: rows.filter(r => r.source !== 'mcp').length, failed, activeTokens: new Set(rows.filter(r => r.actor_type !== 'unknown').map(r => r.actor_id || `${r.actor_type}:${r.actor_name}`)).size, sourceIps: new Set(rows.map(r => r.client_ip).filter(Boolean)).size, successRate: success + failed ? Math.round(success / (success + failed) * 1000) / 10 : null, trend, recentFailures });
+    }
+
     if (pathname === '/api/audit-logs' && req.method === 'GET') {
       if (!principal.admin && !principal.roles.includes('web')) return sendJson(res, 403, { error: 'web_role_required' });
       const all = db.prepare('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 5000').all();

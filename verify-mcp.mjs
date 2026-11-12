@@ -176,6 +176,10 @@ async function main() {
   const audit = await fetch(BA + '/api/audit-logs', { headers: auth });
   const auditBody = await audit.json();
   check('admin 可读取审计日志 → 200', audit.status === 200);
+  const summary = await fetch(BA + '/api/audit-summary?range=24h', { headers: auth });
+  const summaryBody = await summary.json();
+  check('admin 可读取调用概览 → 200', summary.status === 200);
+  check('调用概览包含 MCP/Web/异常/趋势字段', Number.isInteger(summaryBody.mcp) && Number.isInteger(summaryBody.web) && Number.isInteger(summaryBody.failed) && Array.isArray(summaryBody.trend));
   check('审计记录 MCP initialize/tools/list', auditBody.items?.some((x) => x.action === 'mcp.initialize') && auditBody.items?.some((x) => x.action === 'mcp.tools_list'));
   check('审计记录包含来源 IP 与 User-Agent', auditBody.items?.some((x) => x.clientIp === '127.0.0.1' && x.userAgent === '') || auditBody.items?.some((x) => x.clientIp === '127.0.0.1'));
   const auditRaw = JSON.stringify(auditBody);
