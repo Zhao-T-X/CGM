@@ -180,6 +180,9 @@ async function main() {
   const summaryBody = await summary.json();
   check('admin 可读取调用概览 → 200', summary.status === 200);
   check('调用概览包含 MCP/Web/异常/趋势字段', Number.isInteger(summaryBody.mcp) && Number.isInteger(summaryBody.web) && Number.isInteger(summaryBody.failed) && Array.isArray(summaryBody.trend));
+  const mcpAuditOnly = await fetch(BA + '/api/audit-logs?source=mcp', { headers: auth });
+  const mcpAuditOnlyBody = await mcpAuditOnly.json();
+  check('选择 MCP 来源返回 MCP 审计记录', mcpAuditOnly.status === 200 && mcpAuditOnlyBody.items?.length > 0 && mcpAuditOnlyBody.items.every((x) => x.source === 'mcp'));
   check('审计记录 MCP initialize/tools/list', auditBody.items?.some((x) => x.action === 'mcp.initialize') && auditBody.items?.some((x) => x.action === 'mcp.tools_list'));
   check('审计记录包含来源 IP 与 User-Agent', auditBody.items?.some((x) => x.clientIp === '127.0.0.1' && x.userAgent === '') || auditBody.items?.some((x) => x.clientIp === '127.0.0.1'));
   const auditRaw = JSON.stringify(auditBody);
