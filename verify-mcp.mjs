@@ -153,6 +153,8 @@ async function main() {
   const localAudit = await fetch(H + '/api/audit-logs?actorId=local%3Alocal');
   const localAuditBody = await localAudit.json();
   check('local actor 可按时间线筛选审计记录', localAudit.status === 200 && localAuditBody.items?.length > 0);
+  const auditUi = await fs.readFile(path.resolve('public/index.html'), 'utf8');
+  check('审计筛选无结果时保留筛选和时间线布局', auditUi.includes("$('auditLayout').classList.remove('hidden')") && auditUi.includes('function auditEmptyMessage()') && auditUi.includes('No MCP activity'));
   sA.kill('SIGTERM');
 
   /* ---------- 实例 B：LOCAL_NO_AUTH=0 + ADMIN_TOKEN（鉴权强制） ---------- */
