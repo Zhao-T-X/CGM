@@ -648,6 +648,22 @@ tailwind.config = {
   </div>
 </div>
 
+<!-- Confirm dialog (替代浏览器原生 confirm) -->
+<div id="confirmOverlay" onclick="if(event.target===this)closeConfirm(false)"
+  class="fixed inset-0 z-[110] hidden [&.show]:flex items-center justify-center animate-fadeIn">
+  <div role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmMessage"
+    class="bg-surface border border-white/[0.07] rounded-lg p-7 w-full max-w-[440px] shadow-modal">
+    <div id="confirmTitle" class="text-[15px] font-semibold tracking-[-0.01em] mb-2"></div>
+    <p id="confirmMessage" class="text-[13px] text-text-secondary leading-[1.6] whitespace-pre-line"></p>
+    <div class="flex gap-2 justify-end mt-6">
+      <button id="confirmCancel" onclick="closeConfirm(false)"
+        class="inline-flex items-center gap-2 h-8 px-4 rounded-sm font-medium text-[13px] text-text-secondary bg-surface-elevated border border-white/[0.04] hover:text-text-primary hover:border-white/[0.07] hover:bg-surface-hover cursor-pointer transition-colors">Cancel</button>
+      <button id="confirmOk" onclick="closeConfirm(true)"
+        class="inline-flex items-center gap-2 h-8 px-4 rounded-sm font-medium text-[13px] text-error bg-error-dim border border-error/30 hover:bg-error/20 cursor-pointer transition-colors">Remove</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toast + Message Popover -->
 <div id="toast" class="toast fixed top-5 right-5 z-[200] px-5 py-3 rounded-md font-medium text-[13px] tracking-[0.01em] bg-surface border border-white/[0.07] shadow-toast"></div>
 <div id="msgPopover" class="hidden fixed z-[100] bg-surface border border-white/[0.07] rounded-md p-4 text-[13px] text-text-secondary max-w-[480px] max-h-[300px] overflow-y-auto whitespace-pre-wrap break-words shadow-popover"></div>
@@ -711,6 +727,33 @@ async function saveProvider(){const id=$('editProviderId').value,type=$('modalPr
   else{await api('/api/providers',{method:'POST',body:JSON.stringify(body)});toast('Provider added','success');}
   closeModal();await loadSettings();}
 
+/* 统一确认弹窗：替代 window.confirm，危险操作必须走这里 */
+let confirmResolve = null;
+function confirmDialog({ title, message, confirmLabel = 'Remove', danger = true }) {
+  return new Promise((resolve) => {
+    confirmResolve = resolve;
+    $('confirmTitle').textContent = title || 'Are you sure?';
+    $('confirmMessage').textContent = message || '';
+    const ok = $('confirmOk');
+    ok.textContent = confirmLabel;
+    ok.className = danger
+      ? 'inline-flex items-center gap-2 h-8 px-4 rounded-sm font-medium text-[13px] text-error bg-error-dim border border-error/30 hover:bg-error/20 cursor-pointer transition-colors'
+      : 'inline-flex items-center gap-2 h-8 px-4 rounded-sm font-medium text-[13px] text-black bg-accent hover:bg-accent-hover border-0 cursor-pointer transition-colors';
+    $('confirmOverlay').classList.add('show');
+    setTimeout(() => $('confirmCancel').focus(), 0);
+  });
+}
+function closeConfirm(ok) {
+  $('confirmOverlay').classList.remove('show');
+  const resolve = confirmResolve; confirmResolve = null;
+  if (resolve) resolve(!!ok);
+}
+document.addEventListener('keydown', (e) => {
+  if (!$('confirmOverlay').classList.contains('show')) return;
+  if (e.key === 'Escape') { e.preventDefault(); closeConfirm(false); }
+  else if (e.key === 'Enter') { e.preventDefault(); closeConfirm(true); }
+});
+
 async function saveGlobalSettings(){const baseDir=$('baseDir').value.trim();if(!baseDir){toast('Please enter clone base directory','error');return;}const body={cloneBaseDir:baseDir};const ah=$('autoSyncHours').value.trim();if(ah!=='') body.autoSyncHours=parseFloat(ah);await api('/api/settings',{method:'PUT',body:JSON.stringify(body)});toast('Settings saved','success');}
 
 async function loadSettings(){S=await api('/api/settings');providers=await api('/api/providers');$('baseDir').value=S.cloneBaseDir||'';$('autoSyncHours').value=(S.autoSyncHours==null?'' : S.autoSyncHours);renderProviders();renderConn();}
@@ -729,7 +772,7 @@ function renderProviders(){const list=$('providerList');list.innerHTML='';$('pro
       </div>`;
     list.appendChild(div);});}
 async function activateProvider(id){await api('/api/settings',{method:'PUT',body:JSON.stringify({activeProviderId:id})});toast('Provider activated','success');await loadSettings();}
-async function deleteProvider(id){const p=providers.find(x=>x.id===id);if(!confirm('Delete "'+p.name+'"?'))return;await api('/api/providers/'+id,{method:'DELETE'});toast('Provider deleted','success');await loadSettings();}
+async function deleteProvider(id){const p=providers.find(x=>x.id===id);if(!await confirmDialog({title:'Delete provider?',message:`Remove “${p.name}” from providers. Repositories already cloned are kept.`,confirmLabel:'Delete provider'}))return;await api('/api/providers/'+id,{method:'DELETE'});toast('Provider deleted','success');await loadSettings();}
 
 /* Connection status */
 function renderConn(){const badge=$('connStatus'),text=$('connText');const active=providers.find(p=>p.id===S.activeProviderId);
@@ -808,7 +851,7 @@ function openNewSpaceDialog(){$('spaceMenu').style.display='none';$('newSpaceNam
 function closeNewSpace(){$('newSpaceOverlay').classList.remove('show');}
 async function createSpaceFromModal(){const name=$('newSpaceName').value.trim();if(!name){$('newSpaceState').textContent='Enter a space name.';return;}try{const r=await api('/api/spaces',{method:'POST',body:JSON.stringify({name})});if(!r.id){$('newSpaceState').textContent=r.error||'Failed to create space';return;}closeNewSpace();toast('Space created — use + Spaces in the repository table to assign repos','success');await loadSpaces();}catch(e){if(e.message!=='unauthorized')$('newSpaceState').textContent='Failed to create space: '+e.message;}}
 async function createSpaceInline(){const r=repos.find(x=>x.id===spaceDialogRepoId);if(!r)return;const input=$('newSpaceNameInline');const name=input.value.trim();if(!name){input.focus();return;}try{const sp=await api('/api/spaces',{method:'POST',body:JSON.stringify({name})});if(!sp.id){toast(sp.error||'Failed to create space','error');return;}await api(`api/spaces/${sp.id}/repos`,{method:'POST',body:JSON.stringify({repoId:r.id})});input.value='';await loadRepos();openSpaceDialog(spaceDialogRepoId);toast('Space created and assigned','success');}catch(e){if(e.message!=='unauthorized')toast('Failed to create space: '+e.message,'error');}}
-async function delSpace(id){const sp=spaces.find(s=>s.id===id);if(!sp||sp.builtin)return;if(!confirm(`Delete space "${sp.name}"?\nRepos bound to it will be unbound (the repos themselves are kept).`))return;const r=await api(`/api/spaces/${id}`,{method:'DELETE'});if(r.ok){toast('Space deleted','success');if(currentSpace===id)currentSpace='all';await loadSpaces();renderRepos();renderStats();}else toast(r.error||'Failed to delete space','error');}
+async function delSpace(id){const sp=spaces.find(s=>s.id===id);if(!sp||sp.builtin)return;if(!await confirmDialog({title:'Delete space?',message:`“${sp.name}” will be removed and repositories unbound from it. The repositories themselves, their clones and indexes are kept.`,confirmLabel:'Delete space'}))return;const r=await api(`/api/spaces/${id}`,{method:'DELETE'});if(r.ok){toast('Space deleted','success');if(currentSpace===id)currentSpace='all';await loadSpaces();renderRepos();renderStats();}else toast(r.error||'Failed to delete space','error');}
 
 /* Repos — status badge 用 [&.failed]:text-error 等 Tailwind variant */
 let spaceDialogRepoId='';
@@ -950,10 +993,10 @@ function renderRepos(){const tb=$('repoTbody');tb.innerHTML='';const list=curren
 function doWt(id){$('wtBranch').value='';$('wtOverlay').classList.add('show');$('wtOverlay').dataset.id=id;setTimeout(()=>$('wtBranch').focus(),0);}
 function closeWt(){$('wtOverlay').classList.remove('show');}
 async function submitWt(){const br=$('wtBranch').value.trim();if(!br)return;const id=$('wtOverlay').dataset.id;closeWt();const r=repos.find(x=>x.id===id);if(r){r.message='Creating branch worktree...';renderRepos();}try{await api('api/repos/'+id+'/worktree',{method:'POST',body:JSON.stringify({branch:br})});toast('Branch "'+br+'" indexing, retry search later','success');}catch(e){if(e.message!=='unauthorized')toast('Failed to create worktree: '+e.message,'error');}loadRepos();}
-async function doWtRemove(id,branch){if(!confirm('Remove branch "'+branch+'" worktree and its index?'))return;const r=repos.find(x=>x.id===id);if(r){const w=(r.worktrees||[]).find(x=>x.branch===branch);if(w){w.status='removing';w.message='Removing...';renderRepos();}}try{await api('api/repos/'+id+'/worktree/'+encodeURIComponent(branch),{method:'DELETE'});toast('Branch "'+branch+'" removed','success');}catch(e){if(e.message!=='unauthorized')toast('Failed to remove worktree: '+e.message,'error');}loadRepos();}
+async function doWtRemove(id,branch){if(!await confirmDialog({title:'Remove branch worktree?',message:`Branch “${branch}” loses its worktree and code index. The branch in Git is not deleted.`,confirmLabel:'Remove worktree'}))return;const r=repos.find(x=>x.id===id);if(r){const w=(r.worktrees||[]).find(x=>x.branch===branch);if(w){w.status='removing';w.message='Removing...';renderRepos();}}try{await api('api/repos/'+id+'/worktree/'+encodeURIComponent(branch),{method:'DELETE'});toast('Branch "'+branch+'" removed','success');}catch(e){if(e.message!=='unauthorized')toast('Failed to remove worktree: '+e.message,'error');}loadRepos();}
 async function doOp(id,op,btn){if(btn)btn.disabled=true;const r=repos.find(x=>x.id===id);if(r){if(op==='clone')r.status='cloning';else if(op==='analyze'||op==='sync')r.status='indexing';r.message=op==='status'?'Refreshing status...':'Processing...';renderRepos();renderStats();}try{await api('api/repos/'+id+'/'+op,{method:'POST'});}catch(e){if(e.message!=='unauthorized')toast(op+' failed: '+e.message,'error');if(btn)btn.disabled=false;}loadRepos();}
-async function doUnbind(id){const r=repos.find(x=>x.id===id);if(!r)return;if(!confirm('Unbind "'+r.name+'" from this space?\nThe repo, its clone and index are all kept.'))return;try{await api(`api/spaces/${currentSpace}/repos/${id}`,{method:'DELETE'});toast('Unbound from space','success');}catch(e){if(e.message!=='unauthorized')toast('Unbind failed: '+e.message,'error');}loadRepos();}
-async function doRemove(id){const r=repos.find(x=>x.id===id);if(!r)return;if(!confirm('Remove "'+r.name+'" and delete its directory/index?'))return;r.status='removing';r.message='Removing...';renderRepos();renderStats();try{await api('api/repos/'+id+'/remove',{method:'POST'});toast('Removed','success');}catch(e){if(e.message!=='unauthorized')toast('Remove failed: '+e.message,'error');}loadRepos();}
+async function doUnbind(id){const r=repos.find(x=>x.id===id);if(!r)return;if(!await confirmDialog({title:'Unbind from space?',message:`“${r.name}” will no longer appear in this space. The repository, its clone and index are kept.`,confirmLabel:'Unbind'}))return;try{await api(`api/spaces/${currentSpace}/repos/${id}`,{method:'DELETE'});toast('Unbound from space','success');}catch(e){if(e.message!=='unauthorized')toast('Unbind failed: '+e.message,'error');}loadRepos();}
+async function doRemove(id){const r=repos.find(x=>x.id===id);if(!r)return;if(!await confirmDialog({title:'Remove repository?',message:`“${r.name}” will be unregistered, its cloned directory deleted and its code index removed. This cannot be undone.`,confirmLabel:'Remove repository'}))return;r.status='removing';r.message='Removing...';renderRepos();renderStats();try{await api('api/repos/'+id+'/remove',{method:'POST'});toast('Removed','success');}catch(e){if(e.message!=='unauthorized')toast('Remove failed: '+e.message,'error');}loadRepos();}
 
 function mcpEndpointUrl(){return new URL('mcp',location.href).href;}
 function isLoopbackHost(){return ['127.0.0.1','localhost','::1'].includes(location.hostname);}
@@ -969,7 +1012,7 @@ function openTokenCreate(){if(!isAdmin())return;$('tokenName').value='';$('token
 function closeTokenCreate(){$('tokenCreateOverlay').classList.remove('show')}
 async function createToken(){const name=$('tokenName').value.trim(),roles=[];if($('tokenRoleWeb').checked)roles.push('web');if($('tokenRoleMcp').checked)roles.push('mcp');const spaceIds=[...$('tokenSpaces').querySelectorAll('input:checked')].map(i=>i.value);if(!name){$('tokenCreateState').textContent='Enter a name.';return}if(!roles.length){$('tokenCreateState').textContent='Pick at least one role.';return}try{const r=await api('/api/tokens',{method:'POST',body:JSON.stringify({name,roles,spaceIds})});if(!r.token){$('tokenCreateState').textContent=r.error||'Failed to create token';return}$('tokenValue').textContent=r.token;$('tokenCreateForm').classList.add('hidden');$('tokenReveal').classList.remove('hidden');await loadTokens()}catch(e){}}
 async function copyTokenValue(){const ok=await copyText($('tokenValue').textContent);toast(ok?'Token copied':'Copy failed — select the token','success')}
-async function revokeToken(id){if(!confirm('Revoke this token? Clients using it lose access immediately.'))return;try{await api('/api/tokens/'+id,{method:'DELETE'});toast('Token revoked','success');await loadTokens()}catch(e){}}
+async function revokeToken(id){if(!await confirmDialog({title:'Revoke token?',message:'Clients using this token lose access immediately. This cannot be undone.',confirmLabel:'Revoke token'}))return;try{await api('/api/tokens/'+id,{method:'DELETE'});toast('Token revoked','success');await loadTokens()}catch(e){}}
 fillMcp();
 let connLive=false,sse=null;
 function connectSse(){if(sse||!canUseMcp())return;sse=new EventSource(TOKEN?'mcp?token='+encodeURIComponent(TOKEN):'mcp');sse.addEventListener('repos-changed',()=>loadRepos());sse.onopen=()=>{connLive=true;};sse.onerror=()=>{connLive=false;};}

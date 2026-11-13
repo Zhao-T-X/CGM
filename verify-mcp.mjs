@@ -193,6 +193,9 @@ async function main() {
   check('worktrees/ 写进 .git/info/exclude', excludeTxt.split('\n').some((l) => l.trim() === 'worktrees/'));
   const serverSrc = await fs.readFile(path.resolve('server.mjs'), 'utf8');
   check('代码不再向 .gitignore 追加忽略规则', !/appendFile\([^)]*\.gitignore/.test(serverSrc));
+  const uiSrc = await fs.readFile(path.resolve('public/index.html'), 'utf8');
+  check('危险操作不使用浏览器原生 confirm', !/(^|[^A-Za-z])confirm\(/.test(uiSrc));
+  check('提供统一确认弹窗', uiSrc.includes('function confirmDialog(') && uiSrc.includes('id="confirmOverlay"'));
 
   // 12) 任务列表：仓库操作落成可查询、可重试的任务记录
   const t1 = await fetch(`${H}/api/repos/${wid}/sync`, { method: 'POST' });
