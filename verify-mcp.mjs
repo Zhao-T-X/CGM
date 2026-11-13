@@ -153,8 +153,7 @@ async function main() {
   const localAudit = await fetch(H + '/api/audit-logs?actorId=local%3Alocal');
   const localAuditBody = await localAudit.json();
   check('local actor 可按时间线筛选审计记录', localAudit.status === 200 && localAuditBody.items?.length > 0);
-  const auditUi = await fs.readFile(path.resolve('public/index.html'), 'utf8');
-  check('审计筛选无结果时保留筛选和时间线布局', auditUi.includes("$('auditLayout').classList.remove('hidden')") && auditUi.includes('function auditEmptyMessage()') && auditUi.includes('No MCP activity'));
+  const auditUi = await fs.readFile(path.resolve('public/index.html'), 'utf8');  check('审计筛选无结果时保留筛选和时间线布局', auditUi.includes("$('auditLayout').classList.remove('hidden')") && auditUi.includes('function auditEmptyMessage()') && auditUi.includes('No MCP activity'));
 
   // 11) worktree 忽略规则不得写进被跟踪的 .gitignore，否则 git pull 会被本地修改永久拒绝
   const originDir = path.join(ROOT, 'origin.git');
@@ -194,6 +193,27 @@ async function main() {
   check('worktrees/ 写进 .git/info/exclude', excludeTxt.split('\n').some((l) => l.trim() === 'worktrees/'));
   const serverSrc = await fs.readFile(path.resolve('server.mjs'), 'utf8');
   check('代码不再向 .gitignore 追加忽略规则', !/appendFile\([^)]*\.gitignore/.test(serverSrc));
+
+  // 12) 任务列表：仓库操作落成可查询、可重试的任务记录
+  const t1 = await fetch(`${H}/api/repos/${wid}/sync`, { method: 'POST' });
+  const t1Body = await t1.json();
+  check('仓库操作返回 taskId', t1.status === 200 && typeof t1Body.taskId === 'string' && t1Body.taskId.length > 10);
+  const tasksAll = await (await fetch(`${H}/api/tasks`)).json();
+  const firstTask = (tasksAll.items || []).find((x) => x.id === t1Body.taskId);
+  check('任务列表可查到该任务', !!firstTask && firstTask.action === 'sync' && !!firstTask.status);
+  check('任务记录包含触发方式与时间', !!firstTask?.trigger && typeof firstTask?.createdAt === 'number');
+  let finished = firstTask;
+  for (let i = 0; i < 80 && finished && ['queued', 'running'].includes(finished.status); i++) {
+    await sleep(250);
+    const again = await (await fetch(`${H}/api/tasks`)).json();
+    finished = (again.items || []).find((x) => x.id === t1Body.taskId);
+  }
+  check('任务最终进入终态', ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(finished?.status), finished?.status);
+  const cancelDone = await fetch(`${H}/api/tasks/${t1Body.taskId}/cancel`, { method: 'POST' });
+  check('终态任务不可取消 → 409', cancelDone.status === 409, 'status=' + cancelDone.status);
+  const retry = await fetch(`${H}/api/tasks/${t1Body.taskId}/retry`, { method: 'POST' });
+  const retryBody = await retry.json();
+  check('终态任务可重试并生成新任务', retry.status === 200 && retryBody.taskId && retryBody.taskId !== t1Body.taskId);
   sA.kill('SIGTERM');
 
   /* ---------- 实例 B：LOCAL_NO_AUTH=0 + ADMIN_TOKEN（鉴权强制） ---------- */

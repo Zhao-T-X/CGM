@@ -165,6 +165,29 @@ tailwind.config = {
   @media(max-width:1000px){.audit-layout{grid-template-columns:180px minmax(0,1fr)}.audit-detail{grid-column:1/-1;border-left:0;border-top:1px solid #ffffff1f}}
   @media(max-width:680px){.audit-layout{grid-template-columns:1fr}.audit-rail{border-right:0;border-bottom:1px solid #ffffff1f}.audit-actor{display:inline-block;width:48%}.audit-main{padding:16px}.audit-detail{grid-column:auto}.audit-event-time{display:none}}
 </style>
+<style>
+  .task-filter{height:28px;padding:0 10px;background:#111;border:1px solid #ffffff1f;color:#a3a3a3;border-radius:3px;font:11px 'Geist Mono',ui-monospace,monospace;cursor:pointer}
+  .task-filter:hover{color:#e5e5e5;border-color:#3a3a3a}
+  .task-filter.active{background:#1d2148;border-color:#5e6ad2;color:#fff}
+  .task-filter span{color:#737373;margin-left:4px}
+  .task-row{display:grid;grid-template-columns:minmax(0,1.2fr) 92px 104px 84px 96px 132px;gap:10px;align-items:center;padding:10px 12px;border:1px solid #ffffff14;border-radius:4px;background:#0d0d0d;font-size:12px}
+  .task-row:hover{border-color:#ffffff26}
+  .task-repo b{display:block;color:#f5f5f5;font-weight:550;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .task-repo small{display:block;margin-top:2px;color:#737373;font:10px 'Geist Mono',ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .task-badge{justify-self:start;padding:2px 7px;border-radius:99px;font:10px 'Geist Mono',ui-monospace,monospace;background:#1a1a1a;color:#a3a3a3}
+  .task-badge.running{background:#2a2113;color:#e5c07b}
+  .task-badge.queued{background:#151a2e;color:#9aa4ff}
+  .task-badge.succeeded{background:#12251c;color:#7dd3a0}
+  .task-badge.failed{background:#2a1517;color:#ff8a72}
+  .task-badge.cancelled,.task-badge.interrupted{background:#1a1a1a;color:#8a8a8a}
+  .task-meta{color:#8a8a8a;font:10px 'Geist Mono',ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .task-msg{color:#a3a3a3;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .task-msg.bad{color:#ff8a72}
+  .task-actions{display:flex;gap:6px;justify-content:flex-end}
+  .task-btn{height:24px;padding:0 8px;background:#141414;border:1px solid #ffffff1f;color:#d4d4d4;border-radius:3px;font-size:11px;cursor:pointer}
+  .task-btn:hover{border-color:#ffffff40;color:#fff}
+  @media(max-width:900px){.task-row{grid-template-columns:minmax(0,1fr) auto}.task-row .task-meta,.task-row .task-msg,.task-row .task-when{display:none}}
+</style>
 </head>
 <body class="bg-page text-text-primary font-sans overflow-x-hidden min-h-screen">
 <div class="app min-h-screen flex flex-col">
@@ -186,6 +209,7 @@ tailwind.config = {
       <div class="nav-wrap flex order-3 w-full md:order-none md:w-auto gap-0.5 overflow-x-auto">
         <button class="nav-pill [&.active]:text-text-primary [&.active]:bg-surface text-text-tertiary hover:text-text-secondary rounded-sm px-4 py-1.5 font-medium text-[13px] bg-transparent border-0 cursor-pointer transition-colors" data-view="overview">Overview</button>
         <button class="nav-pill [&.active]:text-text-primary [&.active]:bg-surface text-text-tertiary hover:text-text-secondary rounded-sm px-4 py-1.5 font-medium text-[13px] bg-transparent border-0 cursor-pointer transition-colors" data-view="repos">Repositories</button>
+        <button class="nav-pill [&.active]:text-text-primary [&.active]:bg-surface text-text-tertiary hover:text-text-secondary rounded-sm px-4 py-1.5 font-medium text-[13px] bg-transparent border-0 cursor-pointer transition-colors" data-view="tasks">Tasks</button>
         <button class="nav-pill [&.active]:text-text-primary [&.active]:bg-surface text-text-tertiary hover:text-text-secondary rounded-sm px-4 py-1.5 font-medium text-[13px] bg-transparent border-0 cursor-pointer transition-colors" data-view="settings">Settings</button>
         <button class="nav-pill [&.active]:text-text-primary [&.active]:bg-surface text-text-tertiary hover:text-text-secondary rounded-sm px-4 py-1.5 font-medium text-[13px] bg-transparent border-0 cursor-pointer transition-colors" data-view="audit">Audit Logs</button>
       </div>
@@ -300,6 +324,27 @@ tailwind.config = {
         <div id="repoEmpty" class="empty-state hidden flex-col items-center justify-center py-12 px-5 text-text-tertiary text-center">
           <p class="text-[13px] max-w-[320px] leading-[1.6]">No repositories yet. Add a provider in Settings first.</p>
         </div>
+      </div>
+    </div>
+
+    <!-- TASKS -->
+    <div id="view-tasks" class="view hidden [&.active]:block [&.active]:animate-fadeIn">
+      <div class="mb-6 flex items-end justify-between gap-6">
+        <div><h1 class="text-[22px] font-semibold tracking-[-0.025em] leading-[1.3]">Tasks</h1><p class="text-[13px] text-text-tertiary mt-1">Clone, analyze, sync and remove runs</p></div>
+        <button onclick="loadTasks()" class="inline-flex items-center gap-2 h-8 px-4 rounded-sm font-medium text-[13px] text-text-secondary bg-surface-elevated border border-white/[0.04] hover:text-text-primary hover:border-white/[0.07] cursor-pointer transition-colors">Refresh</button>
+      </div>
+      <div id="taskError" class="hidden mb-3 border border-error/30 bg-error-dim text-error px-4 py-3 text-[12px] rounded-sm"></div>
+      <div class="flex flex-wrap items-center gap-2 mb-3">
+        <button data-task-filter="" class="task-filter">All <span id="cntAll"></span></button>
+        <button data-task-filter="running" class="task-filter">Running <span id="cntRunning"></span></button>
+        <button data-task-filter="queued" class="task-filter">Queued <span id="cntQueued"></span></button>
+        <button data-task-filter="succeeded" class="task-filter">Succeeded <span id="cntSucceeded"></span></button>
+        <button data-task-filter="failed" class="task-filter">Failed <span id="cntFailed"></span></button>
+        <button data-task-filter="interrupted" class="task-filter">Interrupted <span id="cntInterrupted"></span></button>
+      </div>
+      <div class="bg-surface border border-white/[0.04] rounded-md p-4">
+        <div id="taskList" class="flex flex-col gap-2"></div>
+        <div id="taskEmpty" class="hidden text-[12px] text-text-tertiary px-2 py-6 text-center">No tasks yet. Run Clone, Analyze, Sync or Remove on a repository.</div>
       </div>
     </div>
 
@@ -714,9 +759,17 @@ async function addSelected(){const items=[...selectedSet].map(i=>results[i]);if(
   for(const p of items){const r=await api('/api/repos',{method:'POST',body:JSON.stringify({name:p.name,gitUrl:p.gitUrl,branch:p.defaultBranch||'',providerId:p.providerId,providerType:p.providerType,spaceIds:currentSpace==='all'?[]:[currentSpace]})});if(r.id)doOp(r.id,'clone');}
   const area=$('searchArea');area.className='flex flex-col items-center justify-center py-12 px-5 text-text-tertiary text-center';area.innerHTML=`<p class="text-[13px] max-w-[320px] leading-[1.6]">Added ${items.length} project(s), cloning & analyzing...</p>`;setTimeout(()=>{$('searchArea').classList.add('hidden');$('searchBox').value='';},4000);}
 
+/* Tasks — 执行记录：谁触发、跑到哪、能否重试 */
+let taskRows=[],taskFilter='';
+async function loadTasks(){try{const q=taskFilter?'?status='+encodeURIComponent(taskFilter):'';const r=await api('/api/tasks'+q);$('taskError').classList.add('hidden');renderTasks(r);}catch(e){$('taskError').textContent=e.message==='forbidden'?'Tasks are not available for this token.':'Unable to load tasks. Retry to try again.';$('taskError').classList.remove('hidden');}}
+function renderTasks(r){taskRows=r.items||[];const c=r.counts||{};$('cntAll').textContent=Object.values(c).reduce((a,b)=>a+b,0);['running','queued','succeeded','failed','interrupted'].forEach(k=>{const el=$('cnt'+k.charAt(0).toUpperCase()+k.slice(1));if(el)el.textContent=c[k]||0;});document.querySelectorAll('.task-filter').forEach(b=>b.classList.toggle('active',(b.dataset.taskFilter||'')===taskFilter));$('taskEmpty').classList.toggle('hidden',taskRows.length>0);$('taskList').innerHTML=taskRows.map(t=>{const done=['succeeded','failed','cancelled','interrupted'].includes(t.status);const when=t.startedAt||t.createdAt;return `<div class="task-row"><div class="task-repo"><b>${esc(t.repoName||t.repoId||'—')}</b><small>${esc(t.action)}${t.branch?' · '+esc(t.branch):''}${t.trigger?' · '+esc(t.trigger):''}</small></div><span class="task-badge ${esc(t.status)}">${esc(t.status)}</span><span class="task-meta">${esc(t.actorName||'system')}</span><span class="task-meta task-when">${esc(timeAgo(when))}</span><span class="task-msg ${t.status==='failed'?'bad':''}" title="${esc(t.error||t.message||'')}">${esc(shortText(t.error||t.message||'—',42))}</span><span class="task-actions">${done?`<button class="task-btn" onclick="taskRetry('${t.id}')">Retry</button>`:`<button class="task-btn" onclick="taskCancel('${t.id}')">Cancel</button>`}</span></div>`;}).join('');}
+document.querySelectorAll('.task-filter').forEach(b=>b.addEventListener('click',()=>{taskFilter=b.dataset.taskFilter||'';loadTasks();}));
+async function taskCancel(id){try{await api('/api/tasks/'+id+'/cancel',{method:'POST'});toast('Task cancelled','success');await loadTasks();}catch{await loadTasks();}}
+async function taskRetry(id){try{const r=await api('/api/tasks/'+id+'/retry',{method:'POST'});toast(r.deduped?'Already running':'Task re-queued','success');await loadTasks();}catch{await loadTasks();}}
+
 /* Space menu — .show / .active 由 Tailwind [&.active]:accent 响应 */
 async function loadSpaces(){spaces=await api('/api/spaces');renderSpaces();}
-function switchView(view){if(view==='settings'&&!isAdmin())view='overview';if(view==='audit'&&!(ME&&(ME.admin||ME.roles.includes('web'))))view='overview';document.querySelectorAll('.nav-pill').forEach(x=>x.classList.toggle('active',x.dataset.view===view));document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active',v.id==='view-'+view));if(view==='settings'&&isAdmin())loadTokens().catch(()=>{});if(view==='audit')loadAudit(true).catch(()=>{});}
+function switchView(view){if(view==='settings'&&!isAdmin())view='overview';if(view==='audit'&&!(ME&&(ME.admin||ME.roles.includes('web'))))view='overview';document.querySelectorAll('.nav-pill').forEach(x=>x.classList.toggle('active',x.dataset.view===view));document.querySelectorAll('.view').forEach(v=>v.classList.toggle('active',v.id==='view-'+view));if(view==='settings'&&isAdmin())loadTokens().catch(()=>{});if(view==='audit')loadAudit(true).catch(()=>{});if(view==='tasks')loadTasks().catch(()=>{});}
 function syncAuditDropdown(target){const value=target.dataset.value||'';target.querySelectorAll('.audit-dropdown-menu button').forEach(b=>{if(b.dataset.value===undefined){const m=(b.getAttribute('onclick')||'').match(/pickAuditFilter\('[^']*','([^']*)'/);b.dataset.value=m?m[1]:'';}b.classList.toggle('active',b.dataset.value===value);});}
 function toggleAuditDropdown(id){const target=$(id);document.querySelectorAll('.audit-dropdown.open').forEach(x=>{if(x!==target)x.classList.remove('open')});syncAuditDropdown(target);target.classList.toggle('open');}
 function pickAuditFilter(id,value,label){const target=$(id);target.dataset.value=value;target.querySelector(':scope > button').textContent=label;target.querySelectorAll('.audit-dropdown-menu button').forEach(b=>b.classList.toggle('active',b.dataset.value===value));target.classList.remove('open');loadAudit(true);}
@@ -763,8 +816,7 @@ function openSpaceDialog(repoId){const r=repos.find(x=>x.id===repoId);if(!r)retu
 function closeSpaceDialog(){$('spaceOverlay').classList.remove('show');}
 async function saveSpaceBindings(){const r=repos.find(x=>x.id===spaceDialogRepoId);if(!r)return;const checked=new Set([...$('spaceDialogList').querySelectorAll('input:checked')].map(i=>i.value));const current=new Set(r.spaceIds||[]);const add=[...checked].filter(id=>!current.has(id));const del=[...current].filter(id=>!checked.has(id));try{for(const id of add)await api(`api/spaces/${id}/repos`,{method:'POST',body:JSON.stringify({repoId:r.id})});for(const id of del)await api(`api/spaces/${id}/repos/${r.id}`,{method:'DELETE'});closeSpaceDialog();toast('Spaces updated','success');await loadRepos();}catch(e){if(e.message!=='unauthorized')toast('Failed to update spaces: '+e.message,'error');}}
 async function loadRepos(){repos=await api('/api/repos');spaces=await api('/api/spaces');renderSpaces();renderRepos();renderStats();renderConn();}
-async function loadActivitySummary(){if(!ME||(ME.admin===false&&!ME.roles.includes('web')))return;try{const r=await api('/api/audit-summary?range=24h');renderActivitySummary(r);}catch{renderActivityError();}}
-function renderActivityError(){if($('activityMcp')){$('activityMcp').textContent='—';$('activityWeb').textContent='—';$('activityFailed').textContent='—';$('activityTokens').textContent='—';$('activitySuccess').textContent='—';$('activityMcpNote').textContent='Unavailable';$('activityWebNote').textContent='';$('activityFailedNote').textContent='';$('activityIpsNote').textContent='';$('activitySuccessNote').textContent='';$('activityBars').innerHTML='<div class="activity-empty">Activity unavailable</div>';$('activityFailures').innerHTML='<div class="activity-empty">Retry later</div>';}}
+async function loadActivitySummary(){if(!ME||(ME.admin===false&&!ME.roles.includes('web')))return;try{const r=await api('/api/audit-summary?range=24h');renderActivitySummary(r);}catch{renderActivityError();}}function renderActivityError(){if($('activityMcp')){$('activityMcp').textContent='—';$('activityWeb').textContent='—';$('activityFailed').textContent='—';$('activityTokens').textContent='—';$('activitySuccess').textContent='—';$('activityMcpNote').textContent='Unavailable';$('activityWebNote').textContent='';$('activityFailedNote').textContent='';$('activityIpsNote').textContent='';$('activitySuccessNote').textContent='';$('activityBars').innerHTML='<div class="activity-empty">Activity unavailable</div>';$('activityFailures').innerHTML='<div class="activity-empty">Retry later</div>';}}
 function renderActivitySummary(s){$('activityMcp').textContent=s.mcp??0;$('activityWeb').textContent=s.web??0;$('activityFailed').textContent=s.failed??0;$('activityTokens').textContent=s.activeTokens??0;$('activitySuccess').textContent=s.successRate==null?'—':s.successRate+'%';$('activityMcpNote').textContent=s.total?`${s.total} total calls`:'No calls yet';$('activityWebNote').textContent=`${s.sourceIps??0} source IP${s.sourceIps===1?'':'s'}`;$('activityFailedNote').textContent=s.failed?'Needs attention':'No exceptions';$('activitySuccessNote').textContent=s.successRate==null?'No completed calls':s.successRate>=99?'Healthy':s.successRate>=95?'Watch closely':'Needs attention';const points=s.trend||[],max=Math.max(1,...points.map(p=>(p.mcp||0)+(p.web||0)));$('activityBars').innerHTML=points.length?points.map(p=>`<i class="activity-bar${p.failed?' failed':''}" title="${p.mcp+p.web} calls · ${p.failed} exceptions" style="height:${Math.max(3,Math.round(((p.mcp||0)+(p.web||0))/max*100))}%"></i>`).join(''):'<div class="activity-empty">No calls yet</div>';const failures=s.recentFailures||[];$('activityFailures').innerHTML=failures.length?failures.map(f=>`<div class="activity-fail"><strong>${esc(f.repoName||f.action||'System')} · ${esc(f.action||'activity')}</strong><span>${esc(f.result)}</span></div>`).join(''):'<div class="activity-empty">No recent exceptions</div>';}
 function statusCls(cls){
   /* 把 status 的 class 映射成 Tailwind class 字符串 */
@@ -923,7 +975,7 @@ let connLive=false,sse=null;
 function connectSse(){if(sse||!canUseMcp())return;sse=new EventSource(TOKEN?'mcp?token='+encodeURIComponent(TOKEN):'mcp');sse.addEventListener('repos-changed',()=>loadRepos());sse.onopen=()=>{connLive=true;};sse.onerror=()=>{connLive=false;};}
 async function boot(){try{await loadMe();await loadSettings();await loadRepos();await loadActivitySummary();if(isAdmin())await loadTokens();connectSse();}catch(e){}}
 boot();
-setInterval(()=>{if(ME){loadRepos();loadActivitySummary();}},30000);
+setInterval(()=>{if(ME){loadRepos();loadActivitySummary();if(document.getElementById('view-tasks')?.classList.contains('active'))loadTasks();}},30000);
 
 /* Message popover */
 function showMsg(el,msg){const popover=$('msgPopover');if(popover.classList.contains('show')&&popover._target===el){popover.classList.remove('show');return;}popover.textContent=msg;popover._target=el;const rect=el.getBoundingClientRect();popover.style.left=Math.min(rect.left,window.innerWidth-500)+'px';popover.style.top=(rect.bottom+8)+'px';popover.classList.add('show');}

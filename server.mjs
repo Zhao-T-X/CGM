@@ -112,7 +112,11 @@ function openDb() {
            CREATE INDEX IF NOT EXISTS audit_logs_action_idx ON audit_logs(action, tool_name);
            CREATE INDEX IF NOT EXISTS audit_logs_repo_idx ON audit_logs(repo_id);
            CREATE INDEX IF NOT EXISTS audit_logs_result_idx ON audit_logs(result);
-           CREATE INDEX IF NOT EXISTS audit_logs_ip_idx ON audit_logs(client_ip);`);
+           CREATE INDEX IF NOT EXISTS audit_logs_ip_idx ON audit_logs(client_ip);
+           CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, repo_id TEXT, repo_name TEXT, branch TEXT, action TEXT NOT NULL, status TEXT NOT NULL, trigger TEXT, actor_id TEXT, actor_name TEXT, message TEXT, error TEXT, created_at INTEGER NOT NULL, started_at INTEGER, finished_at INTEGER, duration_ms INTEGER, cancel_requested_at INTEGER);
+           CREATE INDEX IF NOT EXISTS tasks_created_idx ON tasks(created_at);
+           CREATE INDEX IF NOT EXISTS tasks_repo_idx ON tasks(repo_id, status);
+           CREATE INDEX IF NOT EXISTS tasks_status_idx ON tasks(status);`);
   migrateJsonToSqlite();
 }
 function migrateJsonToSqlite() {
@@ -221,6 +225,7 @@ async function loadAll() {
   if (!settings.cloneBaseDir) settings.cloneBaseDir = CLONE_BASE_DIR_DEFAULT; // 兼容旧数据/空值：兜底回 DATA_DIR/repos
   try { repos = db.prepare('SELECT data FROM repos').all().map((r) => JSON.parse(r.data)); } catch {}
   await healStaleStatus(); // 启动自愈：重置被重启中断的运行中状态
+  interruptRunningTasks(); // 任务同源：重启后被中断的任务标记为 interrupted，可手动重试
   ensureWorktreesField();  // 兼容旧数据：确保 worktrees 字段存在
   ensureSpaceIdsField();   // 兼容旧数据：确保 spaceIds 字段存在
   if (!Array.isArray(settings.spaces) || !settings.spaces.length) settings.spaces = [DEFAULT_SPACE];
@@ -738,20 +743,71 @@ async function opEnsureWorktree(repo, branch) {
 }
 export { opEnsureWorktree };
 
+/* ---------------- 任务中心（持久化生命周期） ---------------- */
+// 任务 = 一次明确的仓库操作（仓库 + 操作 + 分支）。它是执行事实来源：
+// 排队/执行中/成功/失败/取消/中断。仓库 status 仍由各 op 维护（v1），任务负责可观测与可重试。
+const TASK_TERMINAL = ['succeeded', 'failed', 'cancelled', 'interrupted'];
+const ACTIONS = { clone: 'Clone', analyze: 'Analyze', sync: 'Sync', remove: 'Remove' };
+function taskRow(r) {
+  return { id: r.id, repoId: r.repo_id, repoName: r.repo_name, branch: r.branch || '', action: r.action, status: r.status, trigger: r.trigger, actorName: r.actor_name, message: r.message || '', error: r.error || '', createdAt: r.created_at, startedAt: r.started_at, finishedAt: r.finished_at, durationMs: r.duration_ms };
+}
+function interruptRunningTasks() {
+  try {
+    const n = db.prepare("UPDATE tasks SET status='interrupted', finished_at=?, error='Interrupted by restart — retry when ready.' WHERE status IN ('queued','running')").run(Date.now()).changes;
+    if (n) log(`tasks: ${n} 个未完成任务标记为 interrupted`);
+  } catch {}
+}
+function activeTask(repoId, action, branch) {
+  try { return db.prepare("SELECT * FROM tasks WHERE repo_id=? AND action=? AND COALESCE(branch,'')=? AND status IN ('queued','running') ORDER BY created_at DESC LIMIT 1").get(String(repoId), action, branch || ''); } catch { return null; }
+}
+function setTask(id, fields) {
+  const cols = Object.keys(fields);
+  if (!cols.length) return;
+  try { db.prepare(`UPDATE tasks SET ${cols.map(c => `${c}=?`).join(', ')} WHERE id=?`).run(...cols.map(c => fields[c]), id); } catch (e) { log('task update failed', e.message); }
+}
+// 启动任务：同仓同操作同分支已在排队/执行 → 复用（幂等去重），不重复入队
+function startTask({ action, repo, branch = '', trigger = 'manual', principal = null, exec }) {
+  const running = activeTask(repo.id, action, branch);
+  if (running) return { task: taskRow(running), deduped: true };
+  const id = crypto.randomUUID();
+  db.prepare('INSERT INTO tasks (id, repo_id, repo_name, branch, action, status, trigger, actor_id, actor_name, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)')
+    .run(id, repo.id, repo.name, branch || '', action, 'queued', trigger, principal?.id || null, principal?.name || 'system', Date.now());
+  const task = taskRow(db.prepare('SELECT * FROM tasks WHERE id=?').get(id));
+  // 与手动操作保持同一互斥模型：同仓串行，排队期间被取消则跳过执行
+  withRepoLock(repo.id, async () => {
+    const cur = db.prepare('SELECT status FROM tasks WHERE id=?').get(id);
+    if (!cur || cur.status === 'cancelled') return;
+    const t0 = Date.now();
+    setTask(id, { status: 'running', started_at: t0 });
+    try {
+      const ok = await exec();
+      setTask(id, { status: ok === false ? 'failed' : 'succeeded', finished_at: Date.now(), duration_ms: Date.now() - t0, message: (repo.message || '').slice(-400), error: ok === false ? (repo.message || `task ${action} failed`).slice(-400) : '' });
+      log(`task ${action} ${repo.name} -> ${ok === false ? 'failed' : 'ok'}`);
+    } catch (e) {
+      setTask(id, { status: 'failed', finished_at: Date.now(), duration_ms: Date.now() - t0, error: String(e?.message || e).slice(-400) });
+      log('task error', action, repo.name, e?.message || e);
+    }
+  }).catch(() => {});
+  return { task, deduped: false };
+}
+function runAction(action, repo, branch = '') {
+  if (action === 'clone') return opClone(repo);
+  if (action === 'analyze') return opAnalyze(repo);
+  if (action === 'status') return opStatus(repo);
+  if (action === 'sync') return opSync(repo);
+  if (action === 'remove') return opRemove(repo).then(() => true);
+  throw new Error('unknown action ' + action);
+}
+
 /* ---------------- 索引新鲜度自动刷新（SYNC_HOURS） ---------------- */
 async function autoSync() {
   const targets = repos.filter((r) => (r.status === 'indexed' || r.status === 'pull_failed') && r.localPath);
   if (!targets.length) return;
   log(`auto-sync: ${targets.length} 个已索引仓库 git pull + codegraph sync`);
-  // 并发 pull（网络型）+ 经队列限流 sync（CPU/IO 型）；每仓持锁串行，避免与手动操作交叉
-  await Promise.all(targets.map((repo) => withRepoLock(repo.id, async () => {
-    try {
-      if (!await pullRepo(repo)) return; // pull 失败不索引，下轮重试
-      const [cmd, ...args] = parseBin(CODEGRAPH_BIN);
-      const sc = await enqueue(() => run(cmd, [...args, 'sync', repo.localPath], { cwd: settings.cloneBaseDir }));
-      log(`sync ${repo.name} -> ${sc.ok ? 'ok' : 'fail ' + (sc.err || '').slice(-150)}`);
-    } catch (e) { log(`sync error ${repo.name}: ${e.message}`); }
-  })));
+  // 定时同步也进任务中心（trigger=schedule），保证 Overview/任务列表能看到正在跑什么
+  for (const repo of targets) {
+    startTask({ action: 'sync', repo, branch: repo.branch || '', trigger: 'schedule', exec: () => opSync(repo) });
+  }
 }
 // 有效同步频率：settings.autoSyncHours（配置页可调）> env SYNC_HOURS > 默认6；0=关闭
 function getSyncHours() {
@@ -1207,25 +1263,53 @@ const server = http.createServer(async (req, res) => {
       if (!repo) return sendJson(res, 404, { error: 'no_such_repo' });
       if (!repoVisible(principal, repo)) return sendJson(res, 403, { error: 'out_of_scope' });
       const action = m[2];
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.write(JSON.stringify({ ok: true, msg: 'started' }));
-      res.end();
       const auditBase = { action: `repo.${action}`, ...auditRepoFields(repo) };
-      auditEvent(req, principal, { ...auditBase, result: 'accepted', statusCode: 200 });
-      // 同仓操作互斥：并发请求（双击/analyze+remove 同发）在仓锁上排队串行，不交叉执行
-      withRepoLock(repo.id, async () => {
-        try {
-          let ok = false;
-          if (action === 'clone') ok = await opClone(repo);
-          else if (action === 'analyze') ok = await opAnalyze(repo);
-          else if (action === 'status') ok = await opStatus(repo);
-          else if (action === 'sync') ok = await opSync(repo);
-          else if (action === 'remove') { await opRemove(repo); ok = true; }
-          auditEvent(req, principal, { ...auditBase, result: action === 'remove' || ok ? 'success' : 'failed', statusCode: action === 'remove' || ok ? 200 : 500, error: action === 'remove' || ok ? '' : repo.message });
-          log(`repo ${repo.name} ${action} -> ${ok ? 'ok' : 'fail'}`);
-        } catch (e) { auditEvent(req, principal, { ...auditBase, result: 'failed', statusCode: 500, error: e.message }); log('op error', e); }
+      const { task, deduped } = startTask({
+        action, repo, branch: repo.branch || '', trigger: 'manual', principal,
+        exec: () => runAction(action, repo),
       });
-      return;
+      auditEvent(req, principal, { ...auditBase, result: 'accepted', statusCode: 200, error: `task ${task.id}` });
+      return sendJson(res, 200, { ok: true, msg: deduped ? 'already running' : 'started', taskId: task.id, deduped });
+    }
+
+    // 任务列表：与审计一致的可见性（admin 全部；web token 仅授权空间仓库 + 自己的记录）
+    if (pathname === '/api/tasks' && req.method === 'GET') {
+      const rows = db.prepare('SELECT * FROM tasks ORDER BY created_at DESC LIMIT 500').all();
+      const visible = rows.filter(row => {
+        if (principal.admin) return true;
+        if (row.actor_id && row.actor_id === principal.id) return true;
+        const repo = row.repo_id ? repos.find(r => r.id === row.repo_id) : null;
+        return !!repo && repoVisible(principal, repo);
+      }).filter(row => {
+        if (query.status && row.status !== query.status) return false;
+        if (query.repoId && row.repo_id !== query.repoId) return false;
+        if (query.action && row.action !== query.action) return false;
+        if (query.trigger && row.trigger !== query.trigger) return false;
+        return true;
+      });
+      const limit = Math.min(200, Math.max(1, Number.parseInt(query.limit || '100', 10) || 100));
+      const counts = {};
+      for (const row of visible) counts[row.status] = (counts[row.status] || 0) + 1;
+      return sendJson(res, 200, { items: visible.slice(0, limit).map(taskRow), counts });
+    }
+    const tm = pathname.match(/^\/api\/tasks\/([^/]+)\/(cancel|retry)$/);
+    if (tm && req.method === 'POST') {
+      const row = db.prepare('SELECT * FROM tasks WHERE id=?').get(tm[1]);
+      if (!row) return sendJson(res, 404, { error: 'no_such_task' });
+      const repo = row.repo_id ? findRepo(row.repo_id) : null;
+      if (!principal.admin && !(repo && repoVisible(principal, repo))) return sendJson(res, 403, { error: 'out_of_scope' });
+      if (tm[2] === 'cancel') {
+        if (TASK_TERMINAL.includes(row.status)) return sendJson(res, 409, { error: 'task_already_finished', status: row.status });
+        setTask(row.id, { status: 'cancelled', finished_at: Date.now(), cancel_requested_at: Date.now(), error: 'Cancelled before execution' });
+        auditEvent(req, principal, { action: 'task.cancel', result: 'success', statusCode: 200, ...auditRepoFields(repo), error: `task ${row.id}` });
+        return sendJson(res, 200, { ok: true, taskId: row.id, status: 'cancelled' });
+      }
+      // retry：仓库已被删除的具体操作无法重放，直接告诉调用方
+      if (!repo) return sendJson(res, 409, { error: 'repo_removed' });
+      if (!ACTIONS[row.action]) return sendJson(res, 400, { error: 'unsupported_action' });
+      const { task, deduped } = startTask({ action: row.action, repo, branch: row.branch || '', trigger: 'manual', principal, exec: () => runAction(row.action, repo) });
+      auditEvent(req, principal, { action: 'task.retry', result: 'success', statusCode: 200, ...auditRepoFields(repo), error: `task ${task.id}` });
+      return sendJson(res, 200, { ok: true, taskId: task.id, deduped });
     }
 
     sendJson(res, 404, { error: 'not_found' });
