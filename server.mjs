@@ -550,6 +550,41 @@ async function staticServe(req, res, pathname) {
 
 /* ---------------- 仓库操作 ---------------- */
 function findRepo(id) { return repos.find((r) => r.id === id); }
+// worktree 目录在主仓库内，需要让 codegraph 跳过它。
+// 只能写 .git/info/exclude（本地专用、不进版本库）；写被跟踪的 .gitignore 会造成本地修改，
+// 之后每次 git pull 都被 "local changes would be overwritten" 拒绝（P0 事故根因）。
+async function ensureGitExclude(localPath) {
+  if (!localPath) return false;
+  try {
+    const gitDir = path.join(localPath, '.git');
+    if (!fsSync.statSync(gitDir).isDirectory()) return false; // worktree 的 .git 是文件，跳过
+    const excludeFile = path.join(gitDir, 'info', 'exclude');
+    let cur = '';
+    try { cur = await fs.readFile(excludeFile, 'utf8'); } catch {}
+    if (cur.split('\n').some(l => l.trim() === 'worktrees/')) return false;
+    await fs.mkdir(path.dirname(excludeFile), { recursive: true });
+    await fs.appendFile(excludeFile, (cur && !cur.endsWith('\n') ? '\n' : '') + 'worktrees/\n');
+    return true;
+  } catch { return false; }
+}
+// 历史版本曾把 worktrees/ 追加进被跟踪的 .gitignore，使 pull 永久失败。
+// 只在"工作区与 HEAD 的差异仅是我们加的那几行"时自动还原；用户自己的改动一律不碰。
+async function repairWorktreeIgnore(repo) {
+  if (!repo?.localPath) return false;
+  try {
+    const st = await run('git', ['-C', repo.localPath, 'status', '--porcelain', '--', '.gitignore']);
+    if (!st.ok || !st.out.trim()) return false;
+    const head = await run('git', ['-C', repo.localPath, 'show', 'HEAD:.gitignore']);
+    if (!head.ok) return false;
+    let cur = '';
+    try { cur = await fs.readFile(path.join(repo.localPath, '.gitignore'), 'utf8'); } catch { return false; }
+    const norm = (s) => String(s).replace(/\r\n/g, '\n').split('\n').filter(l => l.trim() !== 'worktrees/').join('\n').replace(/\s+$/, '');
+    if (norm(cur) !== norm(head.out)) return false;
+    const co = await run('git', ['-C', repo.localPath, 'checkout', '--', '.gitignore']);
+    if (co.ok) { log(`repaired .gitignore (removed worktrees/ entry) in ${repo.name}`); return true; }
+  } catch {}
+  return false;
+}
 async function opClone(repo) {
   // 防重复：已 indexed 且目录存在 → 直接返回（不重复 clone，也不把已成功状态打回 failed）
   if (repo.status === 'indexed' && repo.localPath && fsSync.existsSync(repo.localPath)) return true;
@@ -566,8 +601,8 @@ async function opClone(repo) {
   const r = await run('git', args);
   if (!r.ok) { repo.status = 'failed'; repo.message = (r.err || r.out).slice(-400); await saveRepos(); return false; }
   repo.localPath = dest; repo.status = 'cloned'; repo.message = r.out.slice(-200); await saveRepos();
-  // 主仓库 .gitignore 追加 worktrees/，豁免分支 worktree 被主索引扫入（多分支策略）
-  await fs.appendFile(path.join(dest, '.gitignore'), '\nworktrees/\n').catch(()=>{});
+  // 主仓库忽略 worktrees/（多分支策略）：写 .git/info/exclude，绝不改被跟踪的 .gitignore
+  await ensureGitExclude(dest);
   // clone 成功 → 自动建索引
   return await opAnalyze(repo);
 }
@@ -587,6 +622,8 @@ async function opAnalyze(repo) {
 // git pull：opSync 与 autoSync 共用。pull 失败 → 统一置 pull_failed、绝不继续索引（防"界面正常但索引是旧的"）
 // status 不得置 indexed；autoSync 目标含 pull_failed，下一轮自动重试
 async function pullRepo(repo) {
+  await repairWorktreeIgnore(repo); // 历史 bug 修复：还原被我们自己改脏的 .gitignore
+  await ensureGitExclude(repo.localPath); // 保证 worktrees/ 被主仓库忽略（本地 exclude，可重复执行）
   const pull = await run('git', ['-C', repo.localPath, 'pull']); // 浅克隆下 fetch 保持 shallow 边界
   if (pull.ok) return true;
   repo.status = 'pull_failed';
@@ -665,13 +702,8 @@ async function opEnsureWorktree(repo, branch) {
   // 构建全程持仓锁：fetch/worktree add/codegraph init 不与该仓其他操作交叉
   withRepoLock(repo.id, async () => {
     try {
-      // 主仓库 .gitignore 追加 worktrees/（豁免分支 worktree 被主索引扫入；兼容已存在的老仓库）
-      const gi = path.join(repo.localPath, '.gitignore');
-      let giContent = '';
-      try { giContent = await fs.readFile(gi, 'utf8'); } catch {}
-      if (!giContent.split('\n').map(s => s.trim()).includes('worktrees/')) {
-        await fs.appendFile(gi, (giContent && !giContent.endsWith('\n') ? '\n' : '') + 'worktrees/\n').catch(()=>{});
-      }
+      // 主仓库忽略 worktrees/（豁免分支 worktree 被主索引扫入；写本地 exclude，不改被跟踪文件）
+      await ensureGitExclude(repo.localPath);
       // fetch 分支引用（浅 fetch 保持 shallow 边界；若远端无此分支，给出友好提示而非堆 git 原始错误）
       const fetchR = await run('git', ['fetch', '--depth', '1', 'origin', `${branch}:refs/remotes/origin/${branch}`], { cwd: repo.localPath });
       if (!fetchR.ok) {

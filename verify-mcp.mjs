@@ -155,6 +155,45 @@ async function main() {
   check('local actor 可按时间线筛选审计记录', localAudit.status === 200 && localAuditBody.items?.length > 0);
   const auditUi = await fs.readFile(path.resolve('public/index.html'), 'utf8');
   check('审计筛选无结果时保留筛选和时间线布局', auditUi.includes("$('auditLayout').classList.remove('hidden')") && auditUi.includes('function auditEmptyMessage()') && auditUi.includes('No MCP activity'));
+
+  // 11) worktree 忽略规则不得写进被跟踪的 .gitignore，否则 git pull 会被本地修改永久拒绝
+  const originDir = path.join(ROOT, 'origin.git');
+  const workDir = path.join(ROOT, 'work-repo');
+  spawnSync('git', ['init', '--bare', originDir]);
+  await fs.mkdir(workDir, { recursive: true });
+  const wgit = (args) => spawnSync('git', args, { cwd: workDir });
+  wgit(['init', '-b', 'main']);
+  await fs.writeFile(path.join(workDir, '.gitignore'), 'node_modules/\n');
+  await fs.writeFile(path.join(workDir, 'a.js'), 'const a=1;\n');
+  wgit(['add', '-A']);
+  wgit(['-c', 'user.name=v', '-c', 'user.email=v@v', 'commit', '-m', 'init']);
+  wgit(['remote', 'add', 'origin', originDir]);
+  wgit(['push', '-u', 'origin', 'main']);
+  // 让远端前进一个提交并同时改动 .gitignore：本地该文件被改时 pull 必须合并 → 被 Git 拒绝
+  await fs.appendFile(path.join(workDir, '.gitignore'), 'dist/\n');
+  wgit(['add', '-A']);
+  wgit(['-c', 'user.name=v', '-c', 'user.email=v@v', 'commit', '-m', 'remote change']);
+  wgit(['push', 'origin', 'main']);
+  wgit(['reset', '--hard', 'HEAD~1']); // 本地退回一格：模拟"本地落后 + 工作区有改动"
+  const addW = await postJson(H + '/api/repos/local', { path: workDir, name: 'verify-worktree-ignore' });
+  const wid = (await addW.json()).id;
+  // 复现历史 bug 留下的脏状态：worktrees/ 被追加进被跟踪的 .gitignore
+  await fs.appendFile(path.join(workDir, '.gitignore'), '\nworktrees/\n');
+  const dirtyPull = spawnSync('git', ['-C', workDir, 'pull']);
+  check('复现：跟踪文件被改后 git pull 失败', dirtyPull.status !== 0);
+  await fetch(`${H}/api/repos/${wid}/sync`, { method: 'POST' });
+  for (let i = 0; i < 80; i++) {
+    const list = await (await fetch(H + '/api/repos')).json();
+    const st = list.find((r) => r.id === wid);
+    if (st && !['indexing', 'syncing', 'cloning'].includes(st.status)) break;
+    await sleep(250);
+  }
+  const wStatus = spawnSync('git', ['-C', workDir, 'status', '--porcelain', '--', '.gitignore']);
+  check('同步前自动修复 .gitignore 污染（工作区干净）', !wStatus.stdout.toString().trim(), wStatus.stdout.toString().trim());
+  const excludeTxt = await fs.readFile(path.join(workDir, '.git', 'info', 'exclude'), 'utf8').catch(() => '');
+  check('worktrees/ 写进 .git/info/exclude', excludeTxt.split('\n').some((l) => l.trim() === 'worktrees/'));
+  const serverSrc = await fs.readFile(path.resolve('server.mjs'), 'utf8');
+  check('代码不再向 .gitignore 追加忽略规则', !/appendFile\([^)]*\.gitignore/.test(serverSrc));
   sA.kill('SIGTERM');
 
   /* ---------- 实例 B：LOCAL_NO_AUTH=0 + ADMIN_TOKEN（鉴权强制） ---------- */
