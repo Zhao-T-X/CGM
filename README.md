@@ -7,10 +7,15 @@
 统一管理 GitLab / Gitee / GitHub 仓库，自动用 [CodeGraph](https://github.com/colbymchenry/codegraph) 构建代码知识图谱，
 通过 **MCP（Model Context Protocol）** 让 Cursor、Claude 等 AI 代理直接检索你的代码。
 
+> **CodeGraph Manager** — self-hosted Git repository manager and MCP server for AI code search.
+> Index GitLab / Gitee / GitHub repos into a code knowledge graph, then let Cursor, Claude and other MCP clients query it.
+> Zero npm dependencies, single Node process, SQLite storage.
+
 [![Node](https://img.shields.io/badge/node-%E2%89%A522.5-339933?logo=node.js&logoColor=white)](https://nodejs.org)
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](#-依赖)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#-license)
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-8A2BE2)](#-mcp-接入)
+[![npm](https://img.shields.io/npm/v/@kennyzhao/cgm)](https://www.npmjs.com/package/@kennyzhao/cgm)
 
 🇨🇳 中文 · <a href="README.en.md">🇬🇧 English</a>
 

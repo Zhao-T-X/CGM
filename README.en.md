@@ -10,6 +10,9 @@ Manage repositories from GitLab / Gitee / GitHub in one place, build a code know
 [![Zero Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)](#-dependencies)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#-license)
 [![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-8A2BE2)](#-mcp-integration)
+[![npm](https://img.shields.io/npm/v/@kennyzhao/cgm)](https://www.npmjs.com/package/@kennyzhao/cgm)
+
+Self-hosted **MCP server for code search**: index GitLab / Gitee / GitHub repositories into a code knowledge graph, then query it from Cursor, Claude or any MCP client. Zero npm dependencies, one Node process, SQLite storage.
 
 <a href="README.md">🇨🇳 中文</a> · 🇬🇧 English
 

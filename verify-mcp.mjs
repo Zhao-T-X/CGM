@@ -196,6 +196,10 @@ async function main() {
   const uiSrc = await fs.readFile(path.resolve('public/index.html'), 'utf8');
   check('危险操作不使用浏览器原生 confirm', !/(^|[^A-Za-z])confirm\(/.test(uiSrc));
   check('提供统一确认弹窗', uiSrc.includes('function confirmDialog(') && uiSrc.includes('id="confirmOverlay"'));
+  const pkg = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8'));
+  check('npm 元数据含搜索关键词', Array.isArray(pkg.keywords) && pkg.keywords.includes('mcp-server') && pkg.keywords.includes('codegraph'));
+  check('npm 元数据声明 mcpName', typeof pkg.mcpName === 'string' && pkg.mcpName.startsWith('io.github.'));
+  check('engines 与 node:sqlite 要求一致', /^>=22\.5/.test(pkg.engines?.node || ''));
 
   // 12) 任务列表：仓库操作落成可查询、可重试的任务记录
   const t1 = await fetch(`${H}/api/repos/${wid}/sync`, { method: 'POST' });
